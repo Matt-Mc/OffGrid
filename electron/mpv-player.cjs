@@ -3,7 +3,7 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 
 const INITIAL_STATE = { videoId: null, status: 'idle', positionSeconds: 0, duration: 0, paused: false, error: null };
-const INSTALL_MESSAGE = 'Install mpv to use the external player (on macOS: brew install mpv), then try again.';
+const BUNDLE_REPAIR_MESSAGE = 'Offgrid’s bundled player is missing or unreadable. Download and reinstall the latest Offgrid release, then try again.';
 const MAX_IPC_BUFFER = 128 * 1024;
 const PROGRESS_ERROR = 'Playback position could not be saved. Check that your library storage is writable.';
 
@@ -13,6 +13,11 @@ function createMpvPlayer(options = {}) {
   const fileSystem = options.fs || fs;
   const spawnProcess = options.spawn || spawn;
   const environment = options.env || process.env;
+  const bundledPath = options.bundledPath;
+  const installMessage = platform === 'darwin'
+    ? 'For development, install mpv with brew install mpv, then refresh the player in Settings.'
+    : 'For development, install mpv using your distribution’s package manager, then refresh the player in Settings.';
+  const startupHelp = bundledPath ? 'Reinstall the latest Offgrid release and try again.' : 'Check that your mpv installation works.';
   const startupTimeoutMs = options.startupTimeoutMs ?? 15_000;
   const shutdownTimeoutMs = options.shutdownTimeoutMs ?? 1_500;
   let current = { ...INITIAL_STATE };
@@ -52,18 +57,31 @@ function createMpvPlayer(options = {}) {
     catch { failed(); }
   }
   async function status() {
-    if (platform === 'win32') return { available: false, path: null, message: 'The controlled mpv player currently supports macOS and Linux. Use the built-in player on Windows.' };
-    const candidates = ['/opt/homebrew/bin/mpv', '/usr/local/bin/mpv', '/usr/bin/mpv', '/Applications/mpv.app/Contents/MacOS/mpv'];
+    if (platform === 'win32') return { available: false, path: null, source: bundledPath ? 'bundled' : 'system', message: 'The controlled mpv player currently supports macOS and Linux. Use the built-in player on Windows.' };
+    if (bundledPath) {
+      try {
+        if (!path.isAbsolute(bundledPath)) throw new Error('Invalid bundled path');
+        await fileSystem.promises.access(bundledPath, fs.constants.X_OK);
+        if (!(await fileSystem.promises.stat(bundledPath)).isFile()) throw new Error('Not a file');
+        return { available: true, path: bundledPath, source: 'bundled', message: 'The bundled mpv player is ready. No separate installation is needed.' };
+      } catch {
+        // An incomplete release must not silently depend on a developer's system installation.
+        return { available: false, path: null, source: 'bundled', message: BUNDLE_REPAIR_MESSAGE };
+      }
+    }
+    const candidates = platform === 'darwin'
+      ? ['/opt/homebrew/bin/mpv', '/usr/local/bin/mpv', '/usr/bin/mpv', '/Applications/mpv.app/Contents/MacOS/mpv']
+      : ['/usr/local/bin/mpv', '/usr/bin/mpv'];
     for (const directory of (environment.PATH || '').split(path.delimiter)) {
       if (path.isAbsolute(directory)) candidates.push(path.join(directory, 'mpv'));
     }
     for (const candidate of new Set(candidates)) {
       try {
         await fileSystem.promises.access(candidate, fs.constants.X_OK);
-        if ((await fileSystem.promises.stat(candidate)).isFile()) return { available: true, path: candidate, message: 'mpv is ready. Videos open in a separate player window.' };
+        if ((await fileSystem.promises.stat(candidate)).isFile()) return { available: true, path: candidate, source: 'system', message: 'mpv is ready. Videos open in a separate player window.' };
       } catch { /* Try the next installation location. */ }
     }
-    return { available: false, path: null, message: INSTALL_MESSAGE };
+    return { available: false, path: null, source: 'system', message: installMessage };
   }
   function send(session, command) {
     if (session.closed || !session.ipc || session.ipc.destroyed) return false;
@@ -128,7 +146,7 @@ function createMpvPlayer(options = {}) {
     session.ipc?.destroy();
     const failed = session.state.status === 'error';
     if (!session.loaded && !session.stopping && !failed) {
-      const message = 'mpv exited before playback started. Check your mpv installation and the media file.';
+      const message = `mpv exited before playback started. Check the media file. ${startupHelp}`;
       emit(session, { status: 'error', error: message });
       session.rejectStartup(new Error(message));
     } else if (!failed && session.state.status !== 'ended') {
@@ -188,22 +206,28 @@ function createMpvPlayer(options = {}) {
     const title = String(video.title || 'Offgrid').replace(/[\r\n\0]/g, ' ').slice(0, 200);
     const args = ['--no-config', '--load-scripts=no', '--ytdl=no', '--access-references=no', '--resume-playback=no', '--save-position-on-quit=no',
       '--input-ipc-client=fd://3', '--input-terminal=no', '--terminal=no', '--force-window=yes', `--title=Offgrid — ${title}`, `--start=${position}`, '--', filePath];
+    const runtimeEnvironment = { ...environment };
+    if (installation.source === 'bundled' && platform === 'darwin') {
+      const vulkanDriver = path.resolve(path.dirname(installation.path), '../share/vulkan/icd.d/MoltenVK_icd.json');
+      runtimeEnvironment.VK_DRIVER_FILES = vulkanDriver;
+      runtimeEnvironment.VK_ICD_FILENAMES = vulkanDriver;
+    }
     try {
-      session.child = spawnProcess(installation.path, args, { shell: false, stdio: ['ignore', 'ignore', 'ignore', 'pipe'], windowsHide: false });
+      session.child = spawnProcess(installation.path, args, { shell: false, stdio: ['ignore', 'ignore', 'ignore', 'pipe'], windowsHide: false, env: runtimeEnvironment });
       session.ipc = session.child.stdio[3];
-      session.child.once('error', () => fail(session, 'mpv could not start. Check that your mpv installation works.'));
+      session.child.once('error', () => fail(session, `mpv could not start. ${startupHelp}`));
       session.child.once('close', code => finish(session, code));
       if (!session.ipc) throw new Error('IPC unavailable');
       session.ipc.on('data', chunk => receive(session, chunk));
       session.ipc.on('error', () => fail(session, 'The connection to mpv was interrupted.'));
-      session.startupTimer = setTimeout(() => fail(session, 'mpv did not start playback in time. Check your mpv installation and try again.'), startupTimeoutMs);
+      session.startupTimer = setTimeout(() => fail(session, `mpv did not start playback in time. ${startupHelp}`), startupTimeoutMs);
       send(session, ['observe_property', 1, 'time-pos']);
       send(session, ['observe_property', 2, 'duration']);
       send(session, ['observe_property', 3, 'pause']);
     } catch {
       if (session.child) fail(session, 'The mpv control connection could not be created.');
       else {
-        const message = 'mpv could not start. Check that your mpv installation works.';
+        const message = `mpv could not start. ${startupHelp}`;
         emit(session, { status: 'error', error: message });
         session.rejectStartup(new Error(message));
         finish(session, null);

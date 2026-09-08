@@ -4,6 +4,8 @@
 
 Offgrid is a desktop video library for flights, train rides, weekends away, and unreliable Wi-Fi. Download videos from YouTube or your local Plex and Jellyfin servers, keep them in one place, and pick up where you left off without an internet connection.
 
+[Download the latest Mac release](https://github.com/Matt-Mc/OffGrid/releases/latest) · [Build status](https://github.com/Matt-Mc/OffGrid/actions/workflows/release.yml)
+
 Built with Electron and React. Early-stage, personal software: feedback and small contributions are welcome.
 
 ![Offgrid library with saved videos, watched status, and Continue watching](docs/images/library.png)
@@ -42,17 +44,12 @@ Mac, Windows, and Linux are the intended destination. See the [platform roadmap]
 
 1. Obtain the ARM64 `.dmg` from the project's maintainer or from the repository's [Releases page](https://github.com/Matt-Mc/OffGrid/releases) if a release has been published. Installers are not stored in the source tree.
 2. Open it, drag **Offgrid** into **Applications**, then launch that copy. Quit older copies running directly from a mounted disk image.
-3. For Plex/Jellyfin playback, install [mpv](https://mpv.io/installation/). With Homebrew:
-
-   ```bash
-   brew install mpv
-   ```
-
-4. Open **Settings** and refresh the player status. Add a YouTube link in **Downloads**, or connect a home server in **Servers**.
+3. mpv is included in installers built from version 0.3.0 onward; no Homebrew or separate player installation is needed. Check the release notes for the required macOS version.
+4. Open **Settings** to check the bundled player status. Add a YouTube link in **Downloads**, or connect a home server in **Servers**.
 
 Current personal builds are signed ad hoc and are **not notarized**. macOS may display a security warning, and updates may prompt for permissions again. A polished signed release for wider distribution is still planned.
 
-You do not need Node.js to run a packaged app. mpv is installed separately. Offgrid attempts to download and verify its managed copies of **yt-dlp** and **FFmpeg** when online; YouTube downloads may need that first-time setup to finish.
+You do not need Node.js to run a packaged app. The installer includes its own mpv runtime and supporting playback libraries. Offgrid attempts to download and verify its managed copies of **yt-dlp** and **FFmpeg** when online; YouTube downloads may need that first-time setup to finish.
 
 ### Run from source
 
@@ -72,7 +69,7 @@ npm run build
 npm start
 ```
 
-A desktop session is required. Linux users also need mpv for server media and an unlocked credential store such as GNOME Keyring or KWallet. Windows remains incomplete even when launched from source.
+A desktop session is required. Source/development runs use a system mpv installation: on macOS, `brew install mpv`. Linux users also need mpv for server media and an unlocked credential store such as GNOME Keyring or KWallet. Windows remains incomplete even when launched from source.
 
 ## Plex and Jellyfin
 
@@ -130,7 +127,7 @@ Before a trip, finish downloads and try playback with your network disconnected.
 | Server works in a browser but not Offgrid | Confirm the local address and port. On macOS, check **Privacy & Security → Local Network**. Development runs may appear as **Electron**. |
 | The local-access check fails | The server may be offline, the address may be wrong, or network access may be blocked. The check reports reachability; it cannot conclusively identify permission denial. |
 | Server credentials cannot be saved | Unlock the system keychain/credential store. On Linux, a usable desktop secret store is required; Offgrid does not fall back to plaintext tokens. |
-| Plex or Jellyfin will not play | Install mpv and refresh its status in Settings. Windows mpv support has not been implemented yet. |
+| Plex or Jellyfin will not play | Packaged Mac builds include mpv; reinstall the app if its bundled player is missing or damaged. Development runs need system mpv. Windows mpv support has not been implemented yet. |
 | A download is waiting for storage | Free disk space, remove saved videos, or increase the library limit. For YouTube, retry at a lower quality. Server downloads retain original quality. |
 | YouTube downloads fail | Check connectivity and the yt-dlp/FFmpeg status in Settings. Update the managed tools and retry; some content is unsupported. |
 | Download stopped when the app closed | Reopen **Downloads** and retry the interrupted item. Partial files are cleaned up; completed files remain available. |
@@ -142,9 +139,9 @@ When reporting a bug, include the app version, OS and CPU architecture, provider
 - **Windows:** implement mpv discovery/control and reliable child-process-tree cancellation; replace Mac-specific setup guidance; build and test an installer.
 - **Linux:** validate mpv, credential storage, downloads, cancellation, and desktop integration on real distributions; choose and test installer formats.
 - **macOS Intel:** build and validate x64 packages and native playback.
-- **All platforms:** add CI coverage and packaged-app checks, keep Electron/dependencies current, and establish a repeatable release process. Add signing/notarization where appropriate.
+- **All platforms:** extend the macOS release workflow to other platforms, add broader native UI coverage, and keep Electron/dependencies current. Add developer signing/notarization where appropriate.
 
-These are planned milestones, not promises that untested builds work today.
+Tagged stable versions now build a macOS ARM64 DMG through [GitHub Actions](https://github.com/Matt-Mc/OffGrid/actions/workflows/release.yml), verify bundled playback, and publish installer/checksum/source assets to Releases. Windows and Linux milestones remain planned; untested builds are not supported releases.
 
 ## Contributing
 
@@ -154,6 +151,6 @@ Keep the interface quiet, preserve users' saved files, and test cancellation and
 
 ## License
 
-Offgrid is released under the [MIT License](LICENSE). Dependencies and external tools retain their own licenses.
+Offgrid is released under the [MIT License](LICENSE). Dependencies and external tools retain their own licenses. See [bundled runtime notices and corresponding sources](docs/third-party.md); mpv and its dependencies are not covered by Offgrid’s MIT license.
 
 Only download media you own or have permission to save. Offgrid is not affiliated with YouTube, Plex, Jellyfin, or mpv.

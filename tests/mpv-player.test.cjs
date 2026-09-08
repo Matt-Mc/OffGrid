@@ -42,6 +42,7 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
 test('discovers mpv without a shell and launches only the supplied local file through inherited IPC', async t => {
   const { player, launches, processes } = harness(t);
   assert.equal((await player.status()).path, '/opt/homebrew/bin/mpv');
+  assert.equal((await player.status()).source, 'system');
   await player.open(media('movie', { title: '--script=/tmp/bad\n$(bad)' }));
   assert.equal(launches[0].config.shell, false);
   assert.deepEqual(launches[0].config.stdio, ['ignore', 'ignore', 'ignore', 'pipe']);
@@ -62,6 +63,68 @@ test('reports installation guidance and unsupported platforms without spawning',
   const windows = harness(t, { dependencies: { platform: 'win32' } });
   assert.match((await windows.player.status()).message, /Windows/);
   assert.equal(absent.processes.length + windows.processes.length, 0);
+});
+
+test('packaged player takes priority and uses its own Vulkan driver without modifying the parent environment', async t => {
+  const bundledPath = '/Applications/Offgrid.app/Contents/Resources/mpv/bin/mpv';
+  const checked = [];
+  const environment = { PATH: '/opt/homebrew/bin', VK_DRIVER_FILES: '/other/driver.json' };
+  const { player, launches } = harness(t, { dependencies: { bundledPath, env: environment,
+    fs: { promises: {
+      async access(file) { checked.push(file); },
+      async stat() { return { isFile: () => true }; },
+      async realpath(file) { return file; },
+    } },
+  } });
+  assert.deepEqual(await player.status(), { available: true, path: bundledPath, source: 'bundled', message: 'The bundled mpv player is ready. No separate installation is needed.' });
+  await player.open(media());
+  assert.equal(launches[0].executable, bundledPath);
+  assert.ok(checked.every(file => file === bundledPath));
+  const driver = '/Applications/Offgrid.app/Contents/Resources/mpv/share/vulkan/icd.d/MoltenVK_icd.json';
+  assert.equal(launches[0].config.env.VK_DRIVER_FILES, driver);
+  assert.equal(launches[0].config.env.VK_ICD_FILENAMES, driver);
+  assert.equal(environment.VK_DRIVER_FILES, '/other/driver.json');
+  assert.equal(environment.VK_ICD_FILENAMES, undefined);
+});
+
+test('a missing packaged player reports reinstall guidance without using an installed system player', async t => {
+  const { player, launches } = harness(t, { dependencies: { bundledPath: '/Applications/Offgrid.app/Contents/Resources/mpv/bin/mpv' } });
+  const status = await player.status();
+  assert.equal(status.available, false);
+  assert.equal(status.source, 'bundled');
+  assert.equal(status.path, null);
+  assert.match(status.message, /reinstall/i);
+  assert.doesNotMatch(status.message, /brew/);
+  await assert.rejects(player.open(media()), /reinstall/i);
+  assert.equal(launches.length, 0);
+});
+
+test('an invalid packaged executable or directory is not considered available', async t => {
+  for (const bundledPath of ['relative/mpv', '/bundle/mpv']) {
+    const { player } = harness(t, { dependencies: { bundledPath,
+      fs: { promises: { async access() {}, async stat() { return { isFile: () => false }; } } },
+    } });
+    assert.equal((await player.status()).available, false);
+    assert.match((await player.status()).message, /reinstall/i);
+  }
+});
+
+test('Linux development uses system paths and Linux installation guidance', async t => {
+  const checked = [];
+  const { player } = harness(t, { dependencies: { platform: 'linux', fs: { promises: {
+    async access(file) { checked.push(file); throw new Error('Missing'); },
+  } } } });
+  const status = await player.status();
+  assert.equal(status.source, 'system');
+  assert.match(status.message, /package manager/);
+  assert.doesNotMatch(status.message, /brew|macOS/);
+  assert.ok(checked.includes('/usr/bin/mpv'));
+  assert.ok(checked.every(file => !file.includes('homebrew') && !file.includes('Applications')));
+});
+
+test('a broken bundled player gives release repair guidance after spawn failure', async t => {
+  const { player } = harness(t, { dependencies: { bundledPath: '/opt/homebrew/bin/mpv', spawn() { throw new Error('Missing dependent library'); } } });
+  await assert.rejects(player.open(media()), /Reinstall the latest Offgrid release/);
 });
 
 test('accepts fragmented messages, saves progress and pause, and ignores malformed properties', async t => {

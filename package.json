@@ -1,6 +1,6 @@
 {
   "name": "offgrid",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A quiet, local library for watching authorized videos offline.",
   "author": "Offgrid",
   "main": "electron/main.cjs",
@@ -12,8 +12,11 @@
     "test:ui": "npm run build && node scripts/smoke-ui.cjs",
     "test:plex-ui": "npm run build && node scripts/smoke-plex-ui.cjs",
     "start": "electron .",
-    "dist": "npm run build && electron-builder",
-    "test:jellyfin-ui": "npm run build && node scripts/smoke-jellyfin-ui.cjs"
+    "dist": "npm run build && electron-builder --mac dmg --arm64",
+    "test:jellyfin-ui": "npm run build && node scripts/smoke-jellyfin-ui.cjs",
+    "bundle:mpv": "node scripts/bundle-mpv.cjs",
+    "bundle:mpv-sources": "node scripts/collect-mpv-sources.cjs",
+    "verify:mpv": "node scripts/verify-bundled-mpv.cjs"
   },
   "dependencies": {
     "react": "^19.0.0",
@@ -42,11 +45,30 @@
       "sign": "scripts/sign-mac.cjs",
       "extendInfo": {
         "NSLocalNetworkUsageDescription": "Offgrid connects to your Plex or Jellyfin server on your local network to browse and download media for offline viewing."
-      }
+      },
+      "extraResources": [
+        {
+          "from": "vendor/mpv",
+          "to": "mpv",
+          "filter": [
+            "**/*"
+          ]
+        }
+      ],
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ]
     },
     "directories": {
       "output": "release"
-    }
+    },
+    "beforePack": "scripts/check-mpv-bundle.cjs",
+    "artifactName": "Offgrid-${version}-${arch}.${ext}"
   },
   "license": "MIT",
   "repository": {

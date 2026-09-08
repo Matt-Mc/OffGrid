@@ -1,0 +1,92 @@
+name: Build macOS release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Validate architecture and release version
+        env:
+          RELEASE_REF: ${{ github.ref }}
+        run: |
+          node -e 'const p=require("./package.json"); if(!/^\d+\.\d+\.\d+$/.test(p.version)) throw new Error("Stable version required"); if(process.arch!=="arm64") throw new Error("ARM64 runner required"); if(process.env.RELEASE_REF.startsWith("refs/tags/") && process.env.RELEASE_REF!=="refs/tags/v"+p.version) throw new Error("Tag must match package.json version");'
+      - name: Install build dependencies
+        run: |
+          npm ci
+          brew install mpv
+      - name: Test backend and player behavior
+        run: npm test
+      - name: Bundle mpv and its exact corresponding sources
+        run: |
+          npm run bundle:mpv
+          npm run bundle:mpv-sources
+      - name: Verify portable decoding and player controls
+        run: node scripts/verify-bundled-mpv.cjs --headless
+      - name: Build DMG
+        run: npm run dist
+      - name: Verify packaged app
+        run: |
+          codesign --verify --deep --strict release/mac-arm64/Offgrid.app
+          node scripts/verify-bundled-mpv.cjs release/mac-arm64/Offgrid.app/Contents/Resources/mpv --headless
+          hdiutil verify release/Offgrid-*-arm64.dmg
+      - name: Prepare release assets and checksums
+        run: node scripts/release-assets.cjs
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: offgrid-macos-arm64
+          path: release/publish/*
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: offgrid-macos-arm64
+          path: assets
+      - name: Publish verified release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        working-directory: assets
+        run: |
+          sha256sum --check SHA256SUMS
+          if gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft > existing-release.txt; then
+            if [ "$(cat existing-release.txt)" != true ]; then
+              echo 'This version is already published. Bump the version instead of replacing its binaries.'
+              exit 1
+            fi
+            gh release upload "$RELEASE_TAG" ./*.dmg ./*-sources-*.tar.gz ./SHA256SUMS ./mpv-runtime-manifest.json ./RELEASE-NOTES.md --clobber
+            gh release edit "$RELEASE_TAG" --draft=false --notes-file RELEASE-NOTES.md
+          else
+            gh release create "$RELEASE_TAG" ./*.dmg ./*-sources-*.tar.gz ./SHA256SUMS ./mpv-runtime-manifest.json ./RELEASE-NOTES.md --verify-tag --title "Offgrid $RELEASE_TAG" --notes-file RELEASE-NOTES.md
+          fi

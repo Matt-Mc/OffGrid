@@ -15,7 +15,7 @@ npm run dev
 
 `npm run dev` starts Vite on loopback and launches Electron when the server is ready. `npm run build` only builds the renderer; `npm start` runs Electron against that build.
 
-Install mpv for native playback. The general UI smoke test also needs an `ffmpeg` executable on PATH to generate its sample clip. The managed FFmpeg inside a normal Offgrid installation does not automatically satisfy that test requirement.
+Development runs use an installed mpv for native playback. Packaged Mac builds require the app-private runtime described below. The general UI smoke test also needs an `ffmpeg` executable on PATH to generate its sample clip. The managed FFmpeg inside a normal Offgrid installation does not automatically satisfy that test requirement.
 
 ## Code map
 
@@ -46,7 +46,7 @@ Backend tests exercise real application code with isolated files, mocked OS faci
 
 UI smoke scripts launch a separate Electron process with temporary app data and print the screenshot directory. They require a graphical desktop session. The server UI tests use disposable credentials and the real OS credential storage. Native mpv launching is disabled in those fixtures; actual native playback requires separate verification.
 
-At the 0.2.0 implementation checkpoint, 96 backend tests and all three UI suites passed on macOS Apple Silicon. Packaged Plex and Jellyfin UI checks also passed. Those results are fixture verification, not proof of live YouTube/Jellyfin behavior or cross-platform support. A live Plex connection was confirmed separately during personal use.
+At the 0.3.0 implementation checkpoint, 117 backend and packaging tests passed on macOS Apple Silicon. Packaged Plex/Jellyfin UI checks and native bundled-player playback, pause/resume, and saved-position checks also passed. Those results are fixture verification, not proof of live YouTube/Jellyfin behavior or cross-platform support. A live Plex connection was confirmed separately during personal use.
 
 For a packaged server UI test on macOS:
 
@@ -90,14 +90,17 @@ Do not commit application data, real server tokens, passwords, or private media.
 
 ## Packaging
 
-On macOS, build an Apple Silicon DMG:
+On an Apple Silicon Mac with Homebrew, prepare the complete runtime and its corresponding-source archive, then build the DMG:
 
 ```bash
-npm run build
-npx electron-builder --mac dmg --arm64
+brew install mpv
+npm run bundle:mpv
+npm run bundle:mpv-sources
+node scripts/verify-bundled-mpv.cjs
+npm run dist
 ```
 
-For an unpacked app directory:
+After preparing the runtime and sources, build an unpacked app directory:
 
 ```bash
 npm run build
@@ -105,18 +108,43 @@ npx electron-builder --dir --mac --arm64
 codesign --verify --deep --strict release/mac-arm64/Offgrid.app
 ```
 
-`npm run dist` uses electron-builder's defaults for the host. It is not a command that produces supported releases for all platforms. Build output goes in the ignored `release/` directory.
+`npm run dist` builds a macOS ARM64 DMG. It does not produce releases for other platforms. Build output goes in the ignored `release/` directory; bundled runtime inputs and source caches go in ignored `vendor/`.
+
+Packaging fails unless every staged runtime file matches its hash and the matching source archive/notices are present. The bundled manifest records input hashes before app signing, which can change executable signatures. See [third-party runtime provenance](third-party.md) for source collection and rebuilding details. The release asset checksums cover the final DMG.
+
+Test the actual packaged player with Homebrew excluded from its PATH:
+
+```bash
+node scripts/verify-bundled-mpv.cjs release/mac-arm64/Offgrid.app/Contents/Resources/mpv
+```
+
+`--headless` checks decoding and player IPC without a window, as used in CI. The normal invocation also exercises native graphics playback. Neither is a substitute for testing the installer on a clean recipient Mac. The minimum macOS version depends on the runtime libraries, is enforced by the app's Info.plist, and is recorded in the manifest and release notes; a locally built runtime can require a newer OS than the CI build.
 
 The custom macOS signing hook adjusts the main executable's Mach-O UUID per app/version and replaces Electron's original signature. It uses a configured Apple identity when available and ad hoc signing otherwise. Local ad hoc builds are not notarized and do not establish stable distribution identity across updates. Installer builds must retain the local-network usage description in `package.json`.
 
-Windows and Linux installer targets, native verification, and CI remain roadmap work. Merely producing an executable on another OS is not sufficient to call it supported.
+Windows and Linux installer targets and native verification remain roadmap work. Merely producing an executable on another OS is not sufficient to call it supported.
 
 ## Preparing a GitHub release
 
-1. Keep the MIT license with the source and check the licensing/redistribution requirements of any binaries included in the release. mpv is currently installed separately; managed download tools are fetched at runtime.
+1. Keep the MIT license with the source and check the licensing/redistribution requirements of any binaries included in the release. mpv is bundled with its license notices and matching source archive; managed download tools are fetched at runtime.
 2. Run the relevant tests/build and inspect UI screenshots. For platform support claims, also test actual installs, keychain access, local-network prompts, playback/resume, cancellation, and restart on that OS.
 3. Review Electron and other dependency versions before publishing a build intended for wider use.
 4. Write release notes with supported OS/architecture, known limitations, and signing status. Attach installers to GitHub Releases, not Git history.
 5. Exclude `node_modules/`, `dist/`, `release/`, local app data, and credentials. The repository's ignore rules cover the standard local directories; arbitrary external data-directory choices remain your responsibility.
 
-The repository currently has no automated cross-platform release workflow. Publishing to GitHub and creating releases are separate steps from building the app locally.
+## Automated releases
+
+[Build macOS release](../.github/workflows/release.yml) runs on stable version tags (`v0.3.0`, for example), or manually from the Actions page. It uses a macOS 15 ARM64 runner, installs build tools, runs the backend tests, bundles mpv and matching sources, verifies native decoding/control, builds and verifies the DMG, then uploads checksummed assets. Only tag runs publish to GitHub Releases; manual runs provide temporary workflow artifacts.
+
+To release a new patch from a clean, tested `main` checkout:
+
+```bash
+npm version patch
+git push origin main --follow-tags
+```
+
+The tag must match `package.json`; prerelease version strings are rejected by this stable-release workflow. The publication job has `contents: write`, while the build job only has read access. No personal access token is needed: publishing uses the job's `GITHUB_TOKEN`. Actions must be enabled in the repository. Binaries are ad hoc signed; no Apple signing secrets are configured by this workflow.
+
+A release is published with its DMG, SHA256 checksums, staged runtime manifest, and corresponding-source archive. A failed source collection or verification blocks publication. If uploading a new release fails, it remains a draft; a rerun can replace draft assets and finish publication. Already-published versions are never overwritten—bump the version for another build. GitHub chooses the Latest release automatically from release dates and versions.
+
+The release uses the Homebrew bottles available on the runner and archives their exact installed recipes and matching sources. This records the inputs actually shipped; it does not claim that rerunning the workflow later selects the same bottles or produces byte-identical binaries.

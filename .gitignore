@@ -7,3 +7,4 @@ local-data/
 .env
 .env.*
 !.env.example
+vendor/

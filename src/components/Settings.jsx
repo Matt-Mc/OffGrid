@@ -136,12 +136,11 @@ export function Settings({
       <section className="settings-section">
         <div className="section-heading"><h2>Playback</h2><span>Separate player window</span></div>
         <div className="setting-group">
-          <SettingRow title={player?.available ? 'mpv is ready' : 'Install mpv for server playback'} description={player?.available ? 'Movies and videos open in mpv. Offgrid saves your progress so you can resume later.' : 'The mpv player supports original Plex and Jellyfin files, multiple audio tracks, and subtitles. YouTube videos can use the built-in player.'}>
+          <SettingRow title={player?.available ? (player.source === 'bundled' ? 'Bundled player is ready' : 'mpv is ready') : 'Server player needs attention'} description={player?.available ? 'Movies and videos open in mpv. Offgrid saves your progress so you can resume later.' : 'The mpv player supports original Plex and Jellyfin files, multiple audio tracks, and subtitles. YouTube videos can use the built-in player.'}>
             <button className="secondary-button compact" disabled={!!saving} onClick={() => runAction('player', onRefreshPlayer)}>{saving === 'player' ? 'Checking…' : 'Refresh player'}</button>
           </SettingRow>
           <ErrorMessage>{errors.player}</ErrorMessage>
         </div>
-        {!player?.available && <p className="section-note">With Homebrew installed, run <code>brew install mpv</code> in Terminal, then refresh the player here.</p>}
         {player?.message && <p className="section-note">{player.message}</p>}
       </section>
       <section ref={storageSection} className="settings-section storage-section" id="storage">

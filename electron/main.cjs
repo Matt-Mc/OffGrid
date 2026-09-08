@@ -1259,6 +1259,7 @@ app.whenReady().then(() => {
     open:async()=>{throw new Error('Native playback is disabled in isolated UI tests.');},
     stop:async()=>{}, control:async()=>{},
   } : createMpvPlayer({
+    bundledPath: app.isPackaged && process.resourcesPath ? path.join(process.resourcesPath,'mpv','bin','mpv') : undefined,
     onProgress:(id,progress)=>{if(library.some(video=>video.id===id)) savePlayback(id,progress);},
     onState:state=>broadcast('player:update',state),
   });

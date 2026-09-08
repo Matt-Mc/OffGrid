@@ -124,7 +124,7 @@ function App() {
         await api.openPlayer(video.id);
         setPlayback(await api.playerState());
       } else if (['plex', 'jellyfin'].includes(video.provider)) {
-        setError('Server downloads play in mpv. Install it with brew install mpv, then refresh the player in Settings.');
+        setError(`Server downloads play in mpv. ${status.message || 'Refresh the player in Settings to check its availability.'}`);
         setView('settings');
       } else {
         setSelected(video);
