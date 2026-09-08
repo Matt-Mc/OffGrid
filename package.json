@@ -1,0 +1,60 @@
+{
+  "name": "offgrid",
+  "version": "0.2.0",
+  "description": "A quiet, local library for watching authorized videos offline.",
+  "author": "Offgrid",
+  "main": "electron/main.cjs",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && electron . --dev\"",
+    "build": "vite build",
+    "test": "node --test tests/*.test.cjs",
+    "test:ui": "npm run build && node scripts/smoke-ui.cjs",
+    "test:plex-ui": "npm run build && node scripts/smoke-plex-ui.cjs",
+    "start": "electron .",
+    "dist": "npm run build && electron-builder",
+    "test:jellyfin-ui": "npm run build && node scripts/smoke-jellyfin-ui.cjs"
+  },
+  "dependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.2",
+    "electron": "^34.3.0",
+    "electron-builder": "^25.1.8",
+    "vite": "^6.1.0",
+    "wait-on": "^8.0.3"
+  },
+  "build": {
+    "appId": "com.offgrid.videolibrary",
+    "productName": "Offgrid",
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json",
+      "LICENSE"
+    ],
+    "mac": {
+      "category": "public.app-category.video",
+      "icon": "build/icon.icns",
+      "sign": "scripts/sign-mac.cjs",
+      "extendInfo": {
+        "NSLocalNetworkUsageDescription": "Offgrid connects to your Plex or Jellyfin server on your local network to browse and download media for offline viewing."
+      }
+    },
+    "directories": {
+      "output": "release"
+    }
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/Matt-Mc/OffGrid.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Matt-Mc/OffGrid/issues"
+  },
+  "homepage": "https://github.com/Matt-Mc/OffGrid#readme"
+}
