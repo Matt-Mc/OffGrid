@@ -30,6 +30,7 @@ Development runs use an installed mpv for native playback. Packaged Mac builds r
 | `electron/*-connection.cjs` | Encrypted credentials and connection state |
 | `electron/local-network.cjs` | Credential-free, bounded TCP reachability probe |
 | `electron/mpv-player.cjs` | Native playback control and progress persistence |
+| `electron/app-updates.cjs`, `electron/update-download.cjs` | Compatible GitHub release discovery and verified installer downloads |
 | `tests/`, `scripts/smoke-*.cjs` | Backend fixtures and actual Electron UI checks |
 
 ## Verification
@@ -40,13 +41,14 @@ npm run build
 npm run test:ui
 npm run test:plex-ui
 npm run test:jellyfin-ui
+npm run test:updates-ui
 ```
 
 Backend tests exercise real application code with isolated files, mocked OS facilities, and local HTTP fixtures. They need permission to bind loopback sockets. They do not contact personal media servers or download actual YouTube content.
 
 UI smoke scripts launch a separate Electron process with temporary app data and print the screenshot directory. They require a graphical desktop session. The server UI tests use disposable credentials and the real OS credential storage. Native mpv launching is disabled in those fixtures; actual native playback requires separate verification.
 
-At the 0.3.0 implementation checkpoint, 117 backend and packaging tests passed on macOS Apple Silicon. Packaged Plex/Jellyfin UI checks and native bundled-player playback, pause/resume, and saved-position checks also passed. Those results are fixture verification, not proof of live YouTube/Jellyfin behavior or cross-platform support. A live Plex connection was confirmed separately during personal use.
+At the 0.3.1 implementation checkpoint, 150 backend, packaging, and updater tests passed on macOS Apple Silicon. Plex/Jellyfin UI checks, update-banner fixtures, and native bundled-player playback, pause/resume, and saved-position checks also passed. Those results are fixture verification, not proof of live YouTube/Jellyfin behavior or cross-platform support. A live Plex connection was confirmed separately during personal use.
 
 For a packaged server UI test on macOS:
 
@@ -148,3 +150,13 @@ The tag must match `package.json`; prerelease version strings are rejected by th
 A release is published with its DMG, SHA256 checksums, staged runtime manifest, and corresponding-source archive. A failed source collection or verification blocks publication. If uploading a new release fails, it remains a draft; a rerun can replace draft assets and finish publication. Already-published versions are never overwritten—bump the version for another build. GitHub chooses the Latest release automatically from release dates and versions.
 
 The release uses the Homebrew bottles available on the runner and archives their exact installed recipes and matching sources. This records the inputs actually shipped; it does not claim that rerunning the workflow later selects the same bottles or produces byte-identical binaries.
+
+## In-app update checks
+
+Packaged apps schedule a bounded GitHub release check after startup, without delaying the library. The renderer requests another check when its connection returns; automatic checks are throttled to once per minute. Settings provides a manual check. Development and test runs do not check real releases.
+
+The main process accepts only newer stable versions from `Matt-Mc/OffGrid`, with matching ARM64 DMG/checksum assets and a runtime manifest compatible with the current macOS version. Offline checks and GitHub failures stay quiet. The renderer cannot supply an installer URL or local path.
+
+Choosing **Update** downloads to a private temporary directory under the app's `updates/` data folder. The downloader enforces size limits and a free-disk reserve, verifies the exact SHA256SUMS entry and GitHub's digest when supplied, checks the DMG footer, then opens the installer. Cancellation and failed verification remove partial files. A completed installer can be reopened after local integrity verification. Saved videos are untouched.
+
+This is an installer update flow: the user quits Offgrid and replaces the app through Finder. [Electron's macOS automatic updater requires code signing](https://www.electronjs.org/docs/latest/tutorial/code-signing); fully automatic replacement needs a proper Apple-signed update pipeline. Do not describe the current ad hoc release as a silent auto-updater. No GitHub token is stored in the app.

@@ -5,6 +5,7 @@ import { Downloads } from './components/Downloads';
 import { Following } from './components/Following';
 import { Settings } from './components/Settings';
 import { Servers } from './components/Plex';
+import { AppUpdateBanner } from './components/AppUpdates';
 import { ConfirmDialog, Icon, StorageBar, formatBytes, pendingStatuses } from './components/shared';
 import './styles.css';
 const defaultSettings = {
@@ -40,6 +41,8 @@ function App() {
     message: 'Checking video processing…'
   });
   const [version, setVersion] = useState('');
+  const [appUpdate,setAppUpdate]=useState({check:{state:'idle'},download:{state:'idle'}});
+  const [dismissedUpdate,setDismissedUpdate]=useState(null);
   const [selected, setSelected] = useState(null);
   const [player, setPlayer] = useState({ available: false, message: 'Checking player…' });
   const [playback, setPlayback] = useState({ status: 'idle' });
@@ -73,6 +76,7 @@ function App() {
     const initial = [[api.listVideos, setVideos], [api.getSettings, setSettings], [api.getStorage, setStorage], [api.listDownloads, setQueue], [api.listSubscriptions, setSubscriptions], [api.subscriptionSyncStatus, setSyncStatus], [api.toolStatus, setTool], [api.ffmpegStatus, setFfmpeg], [api.appVersion, setVersion]];
     if (api.playerStatus) initial.push([api.playerStatus, setPlayer]);
     if (api.playerState) initial.push([api.playerState, setPlayback]);
+    if (api.appUpdateStatus) initial.push([api.appUpdateStatus,setAppUpdate]);
     Promise.allSettled(initial.map(async ([read, write]) => {
       const result = await read();
       if (alive && generation === loadGeneration.current) write(result);
@@ -84,7 +88,11 @@ function App() {
     });
     const listeners = [api.onQueueUpdate(setQueue), api.onSettingsUpdate(setSettings), api.onStorageUpdate(setStorage), api.onLibraryUpdate(setVideos), api.onSubscriptionUpdate(setSubscriptions), api.onSubscriptionSyncUpdate(setSyncStatus), api.onToolUpdate(setTool), api.onFfmpegUpdate(setFfmpeg), api.onSettingsOpen(() => setView('settings'))];
     if (api.onPlayerUpdate) listeners.push(api.onPlayerUpdate(setPlayback));
-    const updateOnline = () => setOnline(navigator.onLine);
+    if (api.onAppUpdate) listeners.push(api.onAppUpdate(setAppUpdate));
+    const updateOnline = () => {
+      setOnline(navigator.onLine);
+      if(navigator.onLine) api.checkAppUpdate?.(true).then(setAppUpdate).catch(()=>{});
+    };
     const shortcut = event => {
       if ((event.metaKey || event.ctrlKey) && event.key === ',') {
         event.preventDefault();
@@ -239,6 +247,10 @@ function App() {
     const result = await (kind === 'tool' ? api.updateTool() : api.updateFfmpeg());
     if (result?.status) (kind === 'tool' ? setTool : setFfmpeg)(result);
   }
+  async function appUpdateAction(action) {
+    try {setAppUpdate(await api[action]());}
+    catch {setAppUpdate(current=>({...current,download:{state:'error',message:'The update could not be completed. Try again when you’re online.'}}));}
+  }
   const externalActive = ['starting', 'playing', 'paused'].includes(playback.status);
   const externalVideo = videos.find(video => video.id === playback.videoId);
   const activeCount = queue.jobs.filter(job => pendingStatuses.includes(job.status)).length;
@@ -287,6 +299,9 @@ function App() {
       </div>
     </aside>
     <main className={`main-content ${externalActive || playback.error ? 'with-external-player' : ''} ${selected && view !== 'player' ? 'with-mini-player' : ''}`}>
+      {appUpdate.check.state==='available' && appUpdate.check.release?.version!==dismissedUpdate && <AppUpdateBanner update={appUpdate}
+        onDownload={()=>appUpdateAction('downloadAppUpdate')} onCancel={()=>appUpdateAction('cancelAppUpdate')}
+        onDismiss={()=>setDismissedUpdate(appUpdate.check.release.version)}/>}
       {!online && <div className="offline-banner">
         <Icon name="offline" size={17} />
         <span>You’re offline. Saved videos are ready to watch, and your media servers can still work on your local network.</span>
@@ -312,7 +327,8 @@ function App() {
         </section>
         {view === 'servers' && <Servers provider={serverProvider} onProviderChange={setServerProvider} onDownloads={() => setView('downloads')} />}
         <section className="screen" hidden={view !== 'settings'} aria-label="Settings">
-          <Settings settings={settings} storage={storage} videos={videos} queue={queue} onSave={saveSettings} onDelete={requestDelete} storageRequest={storageRequest} tool={tool} ffmpeg={ffmpeg} version={version} onUpdateTool={updateTool} player={player} onRefreshPlayer={refreshPlayer} />
+          <Settings settings={settings} storage={storage} videos={videos} queue={queue} onSave={saveSettings} onDelete={requestDelete} storageRequest={storageRequest} tool={tool} ffmpeg={ffmpeg} version={version} onUpdateTool={updateTool} player={player} onRefreshPlayer={refreshPlayer}
+            appUpdate={appUpdate} onCheckAppUpdate={()=>appUpdateAction('checkAppUpdate')} onDownloadAppUpdate={()=>appUpdateAction('downloadAppUpdate')} onCancelAppUpdate={()=>appUpdateAction('cancelAppUpdate')}/>
         </section>
       </>}
       {playerOpening && <p className="player-opening" role="status">Opening player…</p>}

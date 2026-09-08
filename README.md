@@ -51,6 +51,12 @@ Current personal builds are signed ad hoc and are **not notarized**. macOS may d
 
 You do not need Node.js to run a packaged app. The installer includes its own mpv runtime and supporting playback libraries. Offgrid attempts to download and verify its managed copies of **yt-dlp** and **FFmpeg** when online; YouTube downloads may need that first-time setup to finish.
 
+### App updates
+
+Installed builds check GitHub for a newer compatible release shortly after opening. Offline or failed checks stay quiet, and Offgrid checks again when your connection returns. You can also use **Settings → About & diagnostics → Check for updates**.
+
+When a release is available, a dismissible banner offers **Update to [version]**. One click downloads and verifies the installer, then opens it. Quit Offgrid and drag the new copy into **Applications** to finish; your saved library stays in its separate data folder. Current ad hoc signed builds use this installer flow. Automatic install-and-restart updates require a properly signed release pipeline.
+
 ### Run from source
 
 Install **Node.js 22 or newer** and npm, then clone the repository:
@@ -104,7 +110,7 @@ Your media, library, download queue, settings, and viewing progress stay on your
 
 Server tokens are encrypted through the operating system using Electron's [safeStorage](https://www.electronjs.org/docs/latest/api/safe-storage). Offgrid refuses to save them when usable credential encryption is unavailable, including Linux's `basic_text` fallback. Credentials are not included in media URLs or returned to the UI. HTTP connections are unencrypted on the LAN; HTTPS requires a valid server certificate.
 
-Offgrid contacts the services needed for your requested downloads and channel checks, and GitHub for managed yt-dlp/FFmpeg updates. New installations keep automatic channel downloads and saved comments off until you enable them. Existing installations retain their prior preferences. There is no Offgrid account or cloud library sync.
+Offgrid contacts the services needed for your requested downloads and channel checks, and GitHub for app-release checks and managed yt-dlp/FFmpeg updates. App-release checks send no library information, server credentials, or GitHub token. Installer downloads begin only when you choose to update. New installations keep automatic channel downloads and saved comments off until you enable them. Existing installations retain their prior preferences. There is no Offgrid account or cloud library sync.
 
 The optional **Maximum library size** counts saved media, thumbnails, and temporary download files. Offgrid also preserves a **2 GB free-disk reserve**. Processing can need more space than the final video, so downloads may wait even when the finished file would fit. Lowering the limit never automatically deletes existing videos.
 
@@ -117,7 +123,7 @@ Before a trip, finish downloads and try playback with your network disconnected.
 - Server artwork and external subtitle files are not downloaded. Embedded tracks stay in the original file.
 - Watched status and playback position stay in Offgrid; they do not sync back to Plex or Jellyfin.
 - Interrupted downloads restart from the beginning when retried; byte-range resume is not implemented.
-- Channel checks run only while the app is open. There is no background service, remote server discovery, or app self-updater.
+- Channel checks run only while the app is open. There is no background service or remote server discovery. App updates open a verified installer; installation is completed manually.
 - YouTube availability can change. Private, restricted, or DRM-protected content is not a supported workflow.
 
 ## Troubleshooting

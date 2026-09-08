@@ -14,6 +14,20 @@ const { JellyfinConnection } = require('./jellyfin-connection.cjs');
 const { normalizeServerUrl: normalizeJellyfinUrl } = require('./jellyfin-client.cjs');
 const { createMpvPlayer } = require('./mpv-player.cjs');
 const { requestLocalNetworkAccess } = require('./local-network.cjs');
+const { createAppUpdates } = require('./app-updates.cjs');
+const { createUpdateDownload } = require('./update-download.cjs');
+let appUpdates;
+let updateDownload;
+function appUpdateSnapshot() {
+  return { check: appUpdates?.status() || {state:'idle'}, download: updateDownload?.status() || {state:'idle'} };
+}
+function publishAppUpdate() { broadcast('app:update-status', appUpdateSnapshot()); }
+async function checkAppUpdate(automatic = false) {
+  if (testMode || !app.isPackaged || updateDownload?.status().state === 'downloading') return appUpdateSnapshot();
+  if (automatic && typeof net.isOnline === 'function' && !net.isOnline()) return appUpdateSnapshot();
+  await appUpdates.check({force: !automatic});
+  return appUpdateSnapshot();
+}
 const mediaServers = {
   plex: { name: 'Plex', connection: null, busy: false, revision: 0 },
   jellyfin: { name: 'Jellyfin', connection: null, busy: false, revision: 0 },
@@ -1253,6 +1267,12 @@ app.whenReady().then(() => {
   library=library.map(video=>({...video,sizeBytes:video.filePath && fs.existsSync(video.filePath)?fs.statSync(video.filePath).size:video.sizeBytes || 0,playbackPositionSeconds:video.playbackPositionSeconds || 0,watched:Boolean(video.watched)}));
   mediaServers.plex.connection=new PlexConnection(dataDirectory,safeStorage);
   mediaServers.jellyfin.connection=new JellyfinConnection(dataDirectory,safeStorage);
+  appUpdates=createAppUpdates({currentVersion:app.getVersion(),
+    systemVersion:typeof process.getSystemVersion === 'function' ? process.getSystemVersion() : undefined,
+    onChange:publishAppUpdate});
+  updateDownload=createUpdateDownload({directory:path.join(dataDirectory,'updates'),
+    openPath:file=>shell.openPath(file), onChange:publishAppUpdate,
+    freeBytes:()=>{const disk=fs.statfsSync(dataDirectory); return Number(disk.bavail)*Number(disk.bsize);}});
   player=testMode && process.env.OFFGRID_TEST_MPV!=='1' ? {
     status:async()=>({available:false,path:null,message:'Native playback is disabled in isolated UI tests.'}),
     state:()=>({videoId:null,status:'idle',positionSeconds:0,duration:0,paused:false,error:null}),
@@ -1400,6 +1420,15 @@ app.whenReady().then(() => {
   ipcMain.handle("storage:get",()=>storageSnapshot());
   ipcMain.handle("storage:reveal",()=>shell.openPath(dataDirectory));
   ipcMain.handle("app:version",()=>app.getVersion());
+  ipcMain.handle('app:update-status',()=>appUpdateSnapshot());
+  ipcMain.handle('app:update-check',(_event,automatic)=>checkAppUpdate(automatic === true));
+  ipcMain.handle('app:update-download',async()=>{
+    const current=appUpdates.status();
+    if(testMode || !app.isPackaged || current.state!=='available' || !current.release) return appUpdateSnapshot();
+    await updateDownload.download(current.release);
+    return appUpdateSnapshot();
+  });
+  ipcMain.handle('app:update-cancel',async()=>{await updateDownload.cancel();return appUpdateSnapshot();});
   ipcMain.handle("downloads:list",()=>queue.snapshot());
   ipcMain.handle("downloads:pause",(_event,paused)=>queue.pause(paused));
   ipcMain.handle("downloads:cancel",(_event,id)=>queue.cancel(id));
@@ -1430,6 +1459,7 @@ app.whenReady().then(() => {
   ipcMain.handle("download:start",(_event,args)=>queueVideo(args));
 
 	createWindow();
+  if (!testMode && app.isPackaged) setTimeout(()=>{void checkAppUpdate(true).catch(()=>{});},1500).unref?.();
   const settingsMenu={label:"Settings…",accelerator:"CmdOrCtrl+,",click:()=>{
     if(!mainWindow || mainWindow.isDestroyed()) {
       createWindow();
@@ -1463,6 +1493,8 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", () => {
+  appUpdates?.dispose();
+  void updateDownload?.dispose();
   localAccessController?.abort();
   void player?.stop();
   if(queue) {queue.shuttingDown=true; queue.active?.stop("error","Offgrid closed before this download finished. Retry to start again."); queue.persist();}

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ErrorMessage, Icon, QualitySelect, StorageBar, Toggle, formatBytes } from './shared';
+import { UpdateAction, updateDescription } from './AppUpdates';
 function SettingRow({
   title,
   description,
@@ -32,7 +33,11 @@ export function Settings({
   version,
   onUpdateTool,
   player,
-  onRefreshPlayer
+  onRefreshPlayer,
+  appUpdate,
+  onCheckAppUpdate,
+  onDownloadAppUpdate,
+  onCancelAppUpdate
 }) {
   const [saving, setSaving] = useState('');
   const [errors, setErrors] = useState({});
@@ -270,6 +275,9 @@ export function Settings({
           <h2>About & diagnostics</h2>
           <span>Offgrid {version || ''}</span>
         </div>
+        <SettingRow title={appUpdate?.check?.state==='available' ? `Offgrid ${appUpdate.check.release.version} is available` : 'App updates'} description={updateDescription(appUpdate)}>
+          <UpdateAction update={appUpdate} onCheck={onCheckAppUpdate} onDownload={onDownloadAppUpdate} onCancel={onCancelAppUpdate}/>
+        </SettingRow>
         <div className="diagnostics-summary">
           <span className={`tool-dot ${[tool.status, ffmpeg.status].every(status => ['ready', 'fallback'].includes(status)) ? 'ready' : 'busy'}`} />
           <p>

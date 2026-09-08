@@ -152,6 +152,12 @@ h3 { font-size: 13px; font-weight: 600; }
 .offline-banner, .app-error { display: flex; align-items: center; gap: 10px; padding: 12px 25px; background: #f3ecd9; color: #7c643c; font-size: 11px; line-height: 1.5; }
 .app-error { background: #f4e8e2; color: var(--danger); }
 .app-error p { flex: 1; }
+.app-update-banner { display:flex; align-items:center; gap:16px; padding:16px 25px; background:var(--accent-soft, #e5eddf); color:var(--text); }
+.app-update-banner > div { flex:1; min-width:0; }
+.app-update-banner strong { font-size:12px; font-weight:600; }
+.app-update-banner p { font-size:11px; line-height:1.6; margin-top:4px; max-width:600px; }
+.app-update-banner progress { display:block; width:100%; max-width:350px; height:5px; margin-top:9px; accent-color:var(--accent); }
+@media (max-width:950px) { .app-update-banner { flex-wrap:wrap; gap:10px; } .app-update-banner > div { flex-basis:100%; } }
 .loading-message { padding: 50px; color: var(--muted); font-size: 13px; }
 .follow-form-options { display: flex; align-items: center; flex-wrap: wrap; gap: 25px; margin-top: 17px; }
 .checkbox-label { display: inline-flex; align-items: center; gap: 8px; font-size: 11px; }

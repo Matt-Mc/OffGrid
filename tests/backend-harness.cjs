@@ -23,7 +23,11 @@ async function eventually(predicate, message = "Condition did not become true", 
 	throw new Error(message);
 }
 
-async function createHarness({ directory, seed = {}, fixtures = {}, freeBytes = 1e12, encryptionAvailable = true, playerFactory, localAccessRequest } = {}) {
+async function createHarness({ directory, seed = {}, fixtures = {}, freeBytes = 1e12, encryptionAvailable = true, playerFactory, localAccessRequest,
+  testMode = true, updatesFactory, updateDownloadFactory, appVersion = '0.1.0-test' } = {}) {
+  if (!testMode && (!updatesFactory || !updateDownloadFactory)) {
+    throw new Error('Production-mode harness requires isolated updater factories.');
+  }
 	const dataDir = directory || fs.mkdtempSync(path.join(os.tmpdir(), "offgrid-test-"));
 	for (const [filename, value] of Object.entries(seed)) {
 		const target = path.join(dataDir, filename);
@@ -46,7 +50,7 @@ async function createHarness({ directory, seed = {}, fixtures = {}, freeBytes = 
 	const app = new EventEmitter();
 	app.getPath = () => dataDir;
 	app.setPath = () => {};
-	app.getVersion = () => "0.1.0-test";
+	app.getVersion = () => appVersion;
 	app.getName = () => "Offgrid";
 	app.whenReady = () => Promise.resolve();
 	app.quit = () => {};
@@ -155,6 +159,8 @@ async function createHarness({ directory, seed = {}, fixtures = {}, freeBytes = 
 		if (name === "node:child_process") return { spawn };
     if (name === './mpv-player.cjs' && playerFactory) return {createMpvPlayer:playerFactory};
     if (name === './local-network.cjs' && localAccessRequest) return {requestLocalNetworkAccess:localAccessRequest};
+    if (name === './app-updates.cjs' && updatesFactory) return {createAppUpdates:updatesFactory};
+    if (name === './update-download.cjs' && updateDownloadFactory) return {createUpdateDownload:updateDownloadFactory};
 		if (name === "node:https") return { get(url, _options, onResponse) {
 			networkRequests += 1;
 			const request = new EventEmitter();
@@ -173,7 +179,7 @@ async function createHarness({ directory, seed = {}, fixtures = {}, freeBytes = 
 	};
 	sandbox = {
 		require: requireMock, module: { exports: {} }, exports: {}, __dirname: path.dirname(mainPath), __filename: mainPath,
-		process: { pid: process.pid, platform: process.platform, arch: process.arch, argv: [], env: { OFFGRID_TEST_MODE: "1", OFFGRID_TEST_MPV: playerFactory?'1':'0', OFFGRID_DATA_DIR: dataDir, OFFGRID_YTDLP_PATH: "fake-yt-dlp", OFFGRID_FFMPEG_PATH: "fake-ffmpeg" }, on() {}, kill(pid) { const child = [...children].find(item => item.pid === Math.abs(pid)); if (child) child.kill(); } },
+		process: { pid: process.pid, platform: process.platform, arch: process.arch, argv: [], env: { OFFGRID_TEST_MODE: testMode?'1':'0', OFFGRID_TEST_MPV: playerFactory?'1':'0', OFFGRID_DATA_DIR: dataDir, OFFGRID_YTDLP_PATH: "fake-yt-dlp", OFFGRID_FFMPEG_PATH: "fake-ffmpeg" }, on() {}, kill(pid) { const child = [...children].find(item => item.pid === Math.abs(pid)); if (child) child.kill(); } },
 		console, Buffer, URL, Response, AbortController, structuredClone,
 		setTimeout: later, clearTimeout,
 		setInterval: (fn, delay) => {
