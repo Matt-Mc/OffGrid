@@ -1,6 +1,9 @@
 name: Build desktop release
 
 on:
+  pull_request_target:
+    types: [closed]
+    branches: [main]
   push:
     tags: ['v*']
   workflow_dispatch:
@@ -9,11 +12,35 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: false
 
 jobs:
+  prepare:
+    if: github.event_name != 'pull_request_target' || github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.release.outputs.sha }}
+      tag: ${{ steps.release.outputs.tag }}
+      publish: ${{ steps.release.outputs.publish }}
+    steps:
+      # Only execute code already merged into main, never the PR's head branch.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - name: Reserve release version and immutable source tag
+        id: release
+        run: node scripts/prepare-release.cjs
+
   build:
+    needs: prepare
     runs-on: macos-15
     timeout-minutes: 90
     env:
@@ -22,6 +49,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          ref: ${{ needs.prepare.outputs.sha }}
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -29,7 +57,7 @@ jobs:
           cache: npm
       - name: Validate architecture and release version
         env:
-          RELEASE_REF: ${{ github.ref }}
+          RELEASE_REF: ${{ needs.prepare.outputs.tag != '' && format('refs/tags/{0}', needs.prepare.outputs.tag) || github.ref }}
         run: |
           node -e 'const p=require("./package.json"); if(!/^\d+\.\d+\.\d+$/.test(p.version)) throw new Error("Stable version required"); if(process.arch!=="arm64") throw new Error("ARM64 runner required"); if(process.env.RELEASE_REF.startsWith("refs/tags/") && process.env.RELEASE_REF!=="refs/tags/v"+p.version) throw new Error("Tag must match package.json version");'
       - name: Install build dependencies
@@ -62,10 +90,14 @@ jobs:
           compression-level: 0
 
   windows:
+    needs: prepare
     runs-on: windows-2022
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '22'
@@ -90,8 +122,8 @@ jobs:
           compression-level: 0
 
   publish:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build, windows]
+    if: needs.prepare.outputs.publish == 'true'
+    needs: [prepare, build, windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -108,18 +140,21 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
         working-directory: assets
         run: |
           sha256sum --check SHA256SUMS
           sha256sum --check SHA256SUMS-windows
           if gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft > existing-release.txt; then
             if [ "$(cat existing-release.txt)" != true ]; then
-              echo 'This version is already published. Bump the version instead of replacing its binaries.'
-              exit 1
+              echo 'This version is already published; keeping its existing assets.'
+              exit 0
             fi
-            gh release upload "$RELEASE_TAG" ./*.dmg ./*.exe ./*-sources-*.tar.gz ./SHA256SUMS ./SHA256SUMS-windows ./WINDOWS-RELEASE-NOTES.md ./mpv-runtime-manifest.json ./RELEASE-NOTES.md --clobber
-            gh release edit "$RELEASE_TAG" --draft=false --notes-file RELEASE-NOTES.md
           else
-            gh release create "$RELEASE_TAG" ./*.dmg ./*.exe ./*-sources-*.tar.gz ./SHA256SUMS ./SHA256SUMS-windows ./WINDOWS-RELEASE-NOTES.md ./mpv-runtime-manifest.json ./RELEASE-NOTES.md --verify-tag --title "Offgrid $RELEASE_TAG" --notes-file RELEASE-NOTES.md
+            gh release create "$RELEASE_TAG" --draft --verify-tag --title "Offgrid $RELEASE_TAG" --notes-file RELEASE-NOTES.md
           fi
+          gh release upload "$RELEASE_TAG" ./*.dmg ./*.exe ./*-sources-*.tar.gz ./SHA256SUMS ./SHA256SUMS-windows ./WINDOWS-RELEASE-NOTES.md ./mpv-runtime-manifest.json ./RELEASE-NOTES.md --clobber
+          cat RELEASE-NOTES.md WINDOWS-RELEASE-NOTES.md > combined-notes.md
+          gh release edit "$RELEASE_TAG" --notes-file combined-notes.md
+          release_id=$(gh api "repos/$GH_REPO/releases/tags/$RELEASE_TAG" --jq .id)
+          gh api --method PATCH "repos/$GH_REPO/releases/$release_id" -F draft=false -f make_latest=legacy > /dev/null

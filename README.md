@@ -153,7 +153,7 @@ When reporting a bug, include the app version, OS and CPU architecture, provider
 - **macOS Intel:** build and validate x64 packages and native playback.
 - **All platforms:** add broader native UI coverage and Linux release packaging, and keep Electron/dependencies current. Add developer signing/notarization where appropriate.
 
-Tagged stable versions build a macOS ARM64 DMG and Windows x64 installer through [GitHub Actions](https://github.com/Matt-Mc/OffGrid/actions/workflows/release.yml). Both platform jobs must pass before publication. Windows assets use `SHA256SUMS-windows`; Mac assets retain `SHA256SUMS` and their bundled runtime sources. Pull requests run both platform test suites and build a downloadable Windows test installer.
+Merging a PR into `main` automatically reserves the next patch version, builds a macOS ARM64 DMG and Windows x64 installer, and publishes both through [GitHub Actions](https://github.com/Matt-Mc/OffGrid/actions/workflows/release.yml). Both platform jobs must pass before publication. Failed runs can be retried with the same version; published releases are never overwritten. Explicit stable tags are also supported. Windows assets use `SHA256SUMS-windows`; Mac assets retain `SHA256SUMS` and their bundled runtime sources. Pull requests run both platform test suites and build a downloadable Windows test installer.
 
 ## Contributing
 
