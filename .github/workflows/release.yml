@@ -73,6 +73,10 @@ jobs:
       - name: Verify portable decoding and player controls
         run: node scripts/verify-bundled-mpv.cjs --headless
       - name: Build DMG
+        env:
+          # This job builds the verified merged commit from prepare. Electron-builder
+          # otherwise skips our ad hoc signer because the event retains PR metadata.
+          CSC_FOR_PULL_REQUEST: 'true'
         run: npm run dist
       - name: Verify packaged app
         run: |
