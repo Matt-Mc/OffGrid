@@ -32,7 +32,14 @@ async function verify() {
     const progress = [];
     player = createMpvPlayer({ managedStatus: offline.status,
       onProgress: (id, value) => progress.push(value),
-      spawn: (command, args, options) => spawn(command, ['--vo=null', '--ao=null', ...args], options),
+      spawn: (command, args, options) => {
+        const child = spawn(command, ['--vo=null', '--ao=null', ...args, '--terminal=yes'], {...options,stdio:['ignore','pipe','pipe']});
+        let output = '';
+        const capture = chunk => { output = (output + chunk.toString()).slice(-16_384); };
+        child.stdout.on('data', capture); child.stderr.on('data', capture);
+        child.on('close', code => { if (code) console.error(`mpv exited with code ${code}:\n${output}`); });
+        return child;
+      },
     });
     const video = { id: 'fixture', title: 'Windows offline fixture', filePath, duration: 5, playbackPositionSeconds: 1 };
     await player.open(video);
