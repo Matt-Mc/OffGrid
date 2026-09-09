@@ -45,3 +45,11 @@ test('quitting aborts setup and prevents later retries',async t=>{
   assert.equal((await pending).available,false);assert.equal((await f.manager.ensure()).available,false);
   assert.deepEqual(await fs.readdir(f.directory),[]);
 });
+test('offline reuse accepts a legitimate alias in the parent directory',async t=>{
+  const f=await fixture(t);assert.equal((await f.manager.ensure()).available,true);
+  const alias=f.directory+'-alias';
+  await fs.symlink(f.directory,alias,process.platform==='win32'?'junction':'dir');
+  t.after(()=>fs.unlink(alias));
+  const offline=createManagedMpv({...f.config,directory:alias,fetch:async()=>{throw new Error('offline');}});
+  assert.equal((await offline.ensure()).available,true);await offline.dispose();
+});

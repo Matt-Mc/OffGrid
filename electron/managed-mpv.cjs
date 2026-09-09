@@ -31,7 +31,6 @@ async function verifyDirectory(directory, runtime) {
   }
 }
 function createManagedMpv({ directory, fetch = globalThis.fetch, extract = promisify(execFile), runtime = RUNTIME, onChange = () => {} } = {}) {
-  const root = path.resolve(directory, `mpv-windows-${runtime.version}`);
   let pending, controller, disposed = false;
   let value = { available: false, path: null, source: 'managed', message: 'The Windows player needs first-time setup. Connect to the internet and refresh the player.' };
   const status = () => ({ ...value });
@@ -44,6 +43,10 @@ function createManagedMpv({ directory, fetch = globalThis.fetch, extract = promi
       let stage;
       const timer = setTimeout(() => controller.abort(), 120_000);
       try {
+        // Resolve legitimate aliases in the parent (macOS /var and Windows
+        // short names/junctions), while still rejecting a replaced runtime root.
+        await fs.mkdir(directory, { recursive: true });
+        const root = path.join(await fs.realpath(directory), `mpv-windows-${runtime.version}`);
         try { await verifyDirectory(root, runtime); }
         catch {
           value = { ...value, available: false, path: null, message: 'Setting up the Windows player… Keep Offgrid open and connected to the internet.' };
