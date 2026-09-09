@@ -22,6 +22,23 @@ const EXTRACTOR = Object.freeze({
   size: 602624,
   sha256: 'ad4c82fadcbdf93c03b4fc440f300509c7d60c5c2f4d183e35d9d70d6957037d',
 });
+const VULKAN = Object.freeze({
+  url: 'https://sdk.lunarg.com/sdk/download/1.4.357.0/windows/VulkanRT-X64-1.4.357.0-Components.zip',
+  size: 18134567,
+  sha256: 'a14672efed15aafc7f5a16572d35cd3a3416eadf670aeee3cdf50ee32d5fbf83',
+  files: { 'vulkan-1.dll': 'cd862090370454630b31b174e3d4eb474fda38ea034998d1fe1767b0c99a8696' },
+});
+
+async function extractVulkan(archive, directory, signal) {
+  const executable = path.win32.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  // Use Windows' ZIP support only. The older system tar lacks the LZMA codec
+  // needed for mpv's 7z archive. Paths are data in the environment, never code.
+  const script = "$ErrorActionPreference='Stop'; Add-Type -AssemblyName System.IO.Compression.FileSystem; $zip=[System.IO.Compression.ZipFile]::OpenRead($env:OFFGRID_VULKAN_ZIP); try { foreach($file in @('x64/vulkan-1.dll','VulkanRT-License.txt')) { $entry=$zip.GetEntry('VulkanRT-X64-1.4.357.0-Components/'+$file); if(!$entry){throw 'Missing Vulkan component'}; [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry,[System.IO.Path]::Combine($env:OFFGRID_VULKAN_DIR,[System.IO.Path]::GetFileName($file))) } } finally { $zip.Dispose() }";
+  await promisify(execFile)(executable, ['-NoProfile', '-NonInteractive', '-Command', script], {
+    windowsHide: true, timeout: 30_000, signal,
+    env: { ...process.env, OFFGRID_VULKAN_ZIP: archive, OFFGRID_VULKAN_DIR: directory },
+  });
+}
 
 async function downloadPinned(fetch, asset, destination, signal) {
   let url = asset.url, response;
@@ -70,7 +87,8 @@ async function verifyDirectory(directory, runtime) {
     if (!(await fs.lstat(file)).isFile() || await hashFile(file) !== hash) throw new Error('Player verification failed.');
   }
 }
-function createManagedMpv({ directory, fetch = globalThis.fetch, extract = promisify(execFile), runtime = RUNTIME, extractor = EXTRACTOR, onChange = () => {}, onError = () => {} } = {}) {
+function createManagedMpv({ directory, fetch = globalThis.fetch, extract = promisify(execFile), runtime = RUNTIME, extractor = EXTRACTOR, vulkan = VULKAN, extractZip = extractVulkan, onChange = () => {}, onError = () => {} } = {}) {
+  const completeRuntime = { ...runtime, files: { ...runtime.files, ...vulkan?.files } };
   let pending, controller, disposed = false;
   let value = { available: false, path: null, source: 'managed', message: 'The Windows player needs first-time setup. Connect to the internet and refresh the player.' };
   const status = () => ({ ...value });
@@ -87,7 +105,7 @@ function createManagedMpv({ directory, fetch = globalThis.fetch, extract = promi
         // short names/junctions), while still rejecting a replaced runtime root.
         await fs.mkdir(directory, { recursive: true });
         const root = path.join(await fs.realpath(directory), `mpv-windows-${runtime.version}`);
-        try { await verifyDirectory(root, runtime); }
+        try { await verifyDirectory(root, completeRuntime); }
         catch {
           value = { ...value, available: false, path: null, message: 'Setting up the Windows player… Keep Offgrid open and connected to the internet.' };
           await fs.mkdir(directory, { recursive: true });
@@ -100,7 +118,13 @@ function createManagedMpv({ directory, fetch = globalThis.fetch, extract = promi
           await extract(extractorPath, ['x', archive, `-o${stage}`, '-y', '--', ...Object.keys(runtime.files)], { windowsHide: true, timeout: 30_000, signal });
           await fs.unlink(archive);
           await fs.unlink(extractorPath);
-          await verifyDirectory(stage, runtime);
+          if (vulkan) {
+            const zip = path.join(stage, 'vulkan.zip');
+            await downloadPinned(fetch, vulkan, zip, signal);
+            await extractZip(zip, stage, signal);
+            await fs.unlink(zip);
+          }
+          await verifyDirectory(stage, completeRuntime);
           signal.throwIfAborted();
           // Only this fixed, application-owned runtime directory is replaced.
           // A symlink is removed itself; its destination is never traversed.

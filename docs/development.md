@@ -23,6 +23,8 @@ Use Windows x64 with Node.js 22+. Player setup downloads a pinned official 7-Zip
 
 Windows `mpv` starts idle and receives its local file over a random named pipe after event subscriptions are attached. Unix keeps inherited descriptor IPC. The renderer never supplies an executable path, pipe name, or player command. Windows download cancellation awaits `taskkill /T /F` before temporary-file cleanup. A termination failure pauses the queue and preserves working files.
 
+The private player folder also includes a checksum-pinned x64 Vulkan loader from LunarG, so mpv can start without a preinstalled Vulkan runtime. Only the loader and its license are read from that verified ZIP, using Windows PowerShell's built-in ZIP support. The standalone 7-Zip extractor handles the player archive's LZMA compression, which older Windows system tar builds lack.
+
 `electron/managed-mpv.cjs` pins the upstream player and extractor URLs, sizes, SHA256 values, and extracted player executable/DLL hashes. When upgrading it, update all pins together, verify the baseline x86_64 build (not x86_64-v3), and run the native checks. Setup verifies the standalone extractor before executing it, extracts only the named player executable and DLL, and deletes the temporary extractor. Upstream player install/update scripts are never run. No Windows mpv binaries are redistributed in the installer.
 
 Some Windows developer machines need Developer Mode or an elevated terminal for electron-builder's downloaded tool archive, which contains unused macOS symlinks. File-symlink tests explicitly skip when Windows denies that privilege; directory-junction coverage still runs. Mac-only Homebrew path/provenance tests run on the Mac CI job.

@@ -12,7 +12,7 @@ async function fixture(t,options={}) {
   const archive=Buffer.from('archive fixture'),binary=Buffer.from('executable fixture');
   const runtime={version:'fixture',url:'https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/test/mpv.7z',size:archive.length,sha256:hash(archive),files:{'mpv.exe':hash(binary)}};
   let fetched=0,extracted=0;
-  const config={directory,runtime,extractor:runtime,fetch:async()=>{fetched++;return new Response(archive);},extract:async(_cmd,args,opts)=>{
+  const config={directory,runtime,extractor:runtime,vulkan:null,fetch:async()=>{fetched++;return new Response(archive);},extract:async(_cmd,args,opts)=>{
     extracted++;assert.equal(opts.windowsHide,true);assert.deepEqual(args.slice(5),['mpv.exe']);await fs.writeFile(path.join(args[2].slice(2),'mpv.exe'),binary);
   },...options};
   const manager=createManagedMpv(config);t.after(()=>manager.dispose());
@@ -52,4 +52,12 @@ test('offline reuse accepts a legitimate alias in the parent directory',async t=
   t.after(()=>fs.unlink(alias));
   const offline=createManagedMpv({...f.config,directory:alias,fetch:async()=>{throw new Error('offline');}});
   assert.equal((await offline.ensure()).available,true);await offline.dispose();
+});
+test('the private Vulkan loader is also verified and required for offline reuse',async t=>{
+  const bytes=Buffer.from('archive fixture');
+  const f=await fixture(t,{vulkan:{url:'https://sdk.lunarg.com/fixture.zip',size:bytes.length,sha256:hash(bytes),files:{'vulkan-1.dll':hash(bytes)}},extractZip:async(_zip,dir)=>fs.writeFile(path.join(dir,'vulkan-1.dll'),bytes)});
+  assert.equal((await f.manager.ensure()).available,true);
+  await fs.unlink(path.join(path.dirname(f.manager.status().path),'vulkan-1.dll'));
+  const offline=createManagedMpv({...f.config,fetch:async()=>{throw new Error('offline');}});
+  assert.equal((await offline.ensure()).available,false);await offline.dispose();
 });
