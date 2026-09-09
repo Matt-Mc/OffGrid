@@ -159,6 +159,8 @@ async function createHarness({ directory, seed = {}, fixtures = {}, freeBytes = 
 		if (name === "node:child_process") return { spawn };
     if (name === './mpv-player.cjs' && playerFactory) return {createMpvPlayer:playerFactory};
     if (name === './local-network.cjs' && localAccessRequest) return {requestLocalNetworkAccess:localAccessRequest};
+    if (name === './managed-mpv.cjs') return { createManagedMpv: () => ({ status: () => ({available:false,source:'managed',message:'Isolated fixture'}), ensure: async () => {}, dispose: async () => {} }) };
+    if (name === './process-tree.cjs') return { killProcessTree: async child => child.kill('SIGKILL') };
     if (name === './app-updates.cjs' && updatesFactory) return {createAppUpdates:updatesFactory};
     if (name === './update-download.cjs' && updateDownloadFactory) return {createUpdateDownload:updateDownloadFactory};
 		if (name === "node:https") return { get(url, _options, onResponse) {

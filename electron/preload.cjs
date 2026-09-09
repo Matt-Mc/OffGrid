@@ -28,6 +28,7 @@ contextBridge.exposeInMainWorld("offgrid", {
   openPlayer:id=>ipcRenderer.invoke('player:open',id),
   controlPlayer:action=>ipcRenderer.invoke('player:control',action),
   onPlayerUpdate:callback=>listen('player:update',callback),
+  onPlayerAvailability:callback=>listen('player:availability',callback),
   getSettings:()=>ipcRenderer.invoke("settings:get"),
   updateSettings:patch=>ipcRenderer.invoke("settings:update",patch),
   getStorage:()=>ipcRenderer.invoke("storage:get"),

@@ -77,7 +77,7 @@ test('Jellyfin connection saves encrypted token and user identity only, preserve
   assert.equal(status.userId, USER); assert.equal(status.serverName, 'Study'); assert.equal(status.configured, true);
   const saved = fs.readFileSync(path.join(dir, 'jellyfin-connection.json'), 'utf8');
   assert.ok(!saved.includes(TOKEN) && !saved.includes(PASSWORD) && !saved.includes('username'));
-  assert.equal(fs.statSync(path.join(dir, 'jellyfin-connection.json')).mode & 0o777, 0o600);
+  if (process.platform !== 'win32') assert.equal(fs.statSync(path.join(dir, 'jellyfin-connection.json')).mode & 0o777, 0o600);
   assert.equal((await connection.client().identity()).serverId, 'server-123');
   const savedDevice = JSON.parse(saved).deviceId;
   assert.match(savedDevice, /^[a-f0-9-]{36}$/);

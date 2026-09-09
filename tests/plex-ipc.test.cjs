@@ -42,7 +42,7 @@ test('Plex credentials are encrypted, excluded from IPC/state, and survive resta
   const saved=h.read('plex-connection.json');
   assert.ok(saved.encryptedToken);
   assert.ok(!JSON.stringify(saved).includes(token));
-  assert.equal(fs.statSync(path.join(h.dataDir,'plex-connection.json')).mode&0o777,0o600);
+  if (process.platform !== 'win32') assert.equal(fs.statSync(path.join(h.dataDir,'plex-connection.json')).mode&0o777,0o600);
   const directory=h.dataDir;
   await h.dispose({remove:false}); h=await createHarness({directory});
   assert.equal((await h.api.getPlexConfig()).configured,true);

@@ -80,7 +80,7 @@ test('Jellyfin login stores only an encrypted token, survives restart and preser
   assertNoSecrets(status);
   const saved=h.read('jellyfin-connection.json');
   assert.ok(saved.encryptedToken);assertNoSecrets(saved);
-  assert.equal(fs.statSync(path.join(h.dataDir,'jellyfin-connection.json')).mode&0o777,0o600);
+  if (process.platform !== 'win32') assert.equal(fs.statSync(path.join(h.dataDir,'jellyfin-connection.json')).mode&0o777,0o600);
   const directory=h.dataDir;
   await h.dispose({remove:false});h=await createHarness({directory});
   assert.equal((await h.api.getJellyfinConfig()).configured,true);

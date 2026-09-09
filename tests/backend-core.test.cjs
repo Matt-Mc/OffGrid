@@ -50,7 +50,7 @@ test('disk accounting includes nested working files and thumbnails without follo
   fs.mkdirSync(path.join(directory,'working'));
   fs.writeFileSync(path.join(directory,'video.mp4'),Buffer.alloc(100));
   fs.writeFileSync(path.join(directory,'working','video.part'),Buffer.alloc(30));
-  fs.symlinkSync(path.join(directory,'video.mp4'),path.join(directory,'linked.mp4'));
+  fs.symlinkSync(path.join(directory,'working'),path.join(directory,'linked'),process.platform === 'win32' ? 'junction' : 'dir');
   assert.equal(directoryBytes(directory),130);
 });
 

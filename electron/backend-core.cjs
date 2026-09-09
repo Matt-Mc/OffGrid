@@ -1,6 +1,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { killProcessTree } = require('./process-tree.cjs');
 const QUALITIES = ['480p', '720p', '1080p', 'best'];
 const DISK_RESERVE_BYTES = 2_000_000_000;
 const TERMINAL = new Set(['complete', 'error', 'canceled']);
@@ -137,11 +138,8 @@ class DurableQueue {
           active.stopReason={status,message};
           active.controller.abort();
           signalStop(active.stopReason);
-          for(const child of active.children) {
-            // Kill the process group so FFmpeg cannot keep writing after yt-dlp exits.
-            try { if(process.platform!=='win32' && child.pid) process.kill(-child.pid,'SIGKILL'); else child.kill('SIGKILL'); }
-            catch { try { child.kill('SIGKILL'); } catch {} }
-          }
+          active.termination = Promise.all([...active.children].map(child => killProcessTree(child)))
+            .then(() => null, error => error);
         };
         this.active=active;
         this.update(job.id,{status:'preparing',message:'Reading video details…',error:null});
@@ -149,7 +147,11 @@ class DurableQueue {
           await this.execute(job,active);
           if(active.stopReason) throw new Error(active.stopReason.message);
         } catch(error) {
-          this.cleanup(job);
+          const terminationError = await active.termination;
+          if (terminationError) {
+            this.paused = true;
+            active.stopReason = {status:'error',message:terminationError.message};
+          } else this.cleanup(job);
           const outcome=active.stopReason || {status:/network|ENOTFOUND|ENETUNREACH|EAI_AGAIN|connection|timed out|offline/i.test(error.message) ? 'waiting-network' : 'error',message:error.message || 'Download failed.'};
           this.update(job.id,{status:outcome.status,message:outcome.message,error:outcome.status==='canceled'?null:outcome.message,progress:0});
         } finally { this.active=null; finish(); }

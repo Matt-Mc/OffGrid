@@ -88,6 +88,7 @@ function App() {
     });
     const listeners = [api.onQueueUpdate(setQueue), api.onSettingsUpdate(setSettings), api.onStorageUpdate(setStorage), api.onLibraryUpdate(setVideos), api.onSubscriptionUpdate(setSubscriptions), api.onSubscriptionSyncUpdate(setSyncStatus), api.onToolUpdate(setTool), api.onFfmpegUpdate(setFfmpeg), api.onSettingsOpen(() => setView('settings'))];
     if (api.onPlayerUpdate) listeners.push(api.onPlayerUpdate(setPlayback));
+    if (api.onPlayerAvailability) listeners.push(api.onPlayerAvailability(setPlayer));
     if (api.onAppUpdate) listeners.push(api.onAppUpdate(setAppUpdate));
     const updateOnline = () => {
       setOnline(navigator.onLine);

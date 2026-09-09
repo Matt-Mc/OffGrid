@@ -41,6 +41,12 @@ async function validateBundle(root = path.resolve('vendor/mpv'), releaseDirector
   return { manifest, sources, archive };
 }
 module.exports = async context => {
+  if (context.electronPlatformName === 'win32') {
+    if (require('builder-util').Arch[context.arch] !== 'x64') throw new Error('Windows currently supports x64 only.');
+    // Windows provisions a pinned, verified upstream runtime on first launch.
+    // It does not redistribute the Homebrew runtime or its source archive.
+    return;
+  }
   if (context.electronPlatformName !== 'darwin') throw new Error('Bundled installers currently target macOS only.');
   const architecture = require('builder-util').Arch[context.arch];
   await validateBundle(path.join(context.packager.projectDir, 'vendor/mpv'), path.join(context.packager.projectDir, 'release'), architecture);

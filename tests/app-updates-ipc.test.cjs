@@ -135,6 +135,7 @@ test('real downloader sends progress and ready states through main IPC and reope
     testMode: false,
     updateDownloadFactory: options => createUpdateDownload({
       ...options,
+      platform: 'darwin', arch: 'arm64',
       fetch: async url => {
         requests.push(url);
         if (url === release.checksums.url) return new Response(checksums);

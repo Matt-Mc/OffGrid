@@ -247,7 +247,7 @@ function collectNotices(archives, directory, licenseDir) {
     if (archive.name === 'patch' || typeof archive.inline === 'string') continue;
     const filename = path.join(directory, archive.file);
     let entries;
-    try { entries = run('tar', ['-tf', filename]).split('\n'); } catch { continue; }
+    try { entries = run('tar', ['-tf', filename]).split(/\r?\n/); } catch { continue; }
     for (const entry of entries) {
       if (!/(?:^|\/)(?:licen[sc]e|copying|copyright|notice)(?:[._-][^/]*)?$/i.test(entry)) continue;
       // Read content through tar without extracting untrusted filesystem paths.

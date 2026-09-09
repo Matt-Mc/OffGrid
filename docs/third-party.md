@@ -36,6 +36,12 @@ Use a compatible macOS/Xcode toolchain and Homebrew to build those exact recipes
 
 After rebuilding, run `npm run bundle:mpv` in the Offgrid checkout to copy the new runtime, relocate library references relative to mpv, and sign the copied Mach-O files. Run source collection again before packaging. A modified runtime has new hashes and requires a new source inventory. The app resolves the bundled `mpv/bin/mpv` before searching the user's PATH.
 
+## Windows managed player
+
+Windows installers do not contain the Mac/Homebrew runtime. On first launch, the Windows x64 app downloads the pinned baseline x86_64 archive directly from [shinchiro's mpv builds](https://github.com/shinchiro/mpv-winbuild-cmake/releases/tag/20260903). Its archive and extracted executable/DLL hashes are recorded in `electron/managed-mpv.cjs`. Only `mpv.exe` and `d3dcompiler_43.dll` are extracted; upstream installer and updater scripts are not run. The downloaded runtime stays in the user's application data folder for offline playback.
+
+See the [upstream build project](https://github.com/shinchiro/mpv-winbuild-cmake) and [mpv copyright/license](https://github.com/mpv-player/mpv/blob/master/Copyright) for that runtime's build and license information. The Mac corresponding-source collection requirements above continue to apply to the bundled Mac runtime.
+
 ## Other dependencies
 
 Electron, Chromium, Node.js, and JavaScript dependencies retain their own notices in the packaged application and upstream packages. yt-dlp and the separately managed download FFmpeg binary have their own distribution and license terms; this document describes the **bundled playback runtime**, including FFmpeg libraries that mpv links against.

@@ -25,18 +25,18 @@ Built with Electron and React. Early-stage, personal software: feedback and smal
 
 ## Platform support
 
-**The currently tested release is macOS on Apple Silicon.** The application has code for other platforms, but that is not the same as a supported release.
+**The published Mac release targets Apple Silicon.** Windows x64 support includes an installer, managed player setup, native playback, and verified installer updates. Windows checks cover generated offline media and local server fixtures; broader real-machine testing remains useful.
 
 | Platform | Current status |
 | --- | --- |
 | **macOS — Apple Silicon (M-series)** | Tested app and ARM64 DMG. Library, queue, playback, and Plex/Jellyfin fixture flows verified. |
 | **macOS — Intel** | Download-tool architecture support exists; no Intel package or runtime validation yet. |
 | **Linux — x64 / ARM64** | Experimental. Download-tool selection and mpv integration exist; installers, desktop integration, and real-machine behavior remain unverified. Server sign-in requires a working desktop secret store. |
-| **Windows — x64** | Incomplete. Download-tool selection exists, but Offgrid's mpv integration is disabled on Windows. Plex/Jellyfin playback inside Offgrid is therefore unavailable. No validated Windows installer yet. |
+| **Windows — x64** | NSIS installer, managed mpv setup, playback/resume, and process-tree cancellation. First-time player and download-tool setup requires internet. Windows 10 version 1803 or later; Windows 11 recommended for testing. |
 
 Other architectures are not currently supported. No minimum OS version has been validated for Offgrid itself.
 
-Mac, Windows, and Linux are the intended destination. See the [platform roadmap](#platform-roadmap) for the remaining work; please treat Linux and Windows source builds as development experiments.
+See the [platform roadmap](#platform-roadmap) for the remaining work. Linux source builds remain experimental; native Windows ARM64 and 32-bit packages are not provided.
 
 ## Getting started
 
@@ -51,11 +51,17 @@ Current personal builds are signed ad hoc and are **not notarized**. macOS may d
 
 You do not need Node.js to run a packaged app. The installer includes its own mpv runtime and supporting playback libraries. Offgrid attempts to download and verify its managed copies of **yt-dlp** and **FFmpeg** when online; YouTube downloads may need that first-time setup to finish.
 
+### Windows app
+
+Run `Offgrid-<version>-win-x64.exe` from a release that includes Windows assets and follow the setup prompts. The installer preserves your separate library data when updating or uninstalling. Current Windows builds are unsigned.
+
+On first launch, stay online while Offgrid downloads and verifies mpv, yt-dlp, and FFmpeg. Check **Settings** for player and download-component readiness before going offline. Player setup uses Windows' built-in `tar.exe`; if setup fails, reconnect and use **Refresh player** in Settings. Once setup finishes, Plex/Jellyfin originals play in a separate mpv window with saved viewing progress, including offline.
+
 ### App updates
 
 Installed builds check GitHub for a newer compatible release shortly after opening. Offline or failed checks stay quiet, and Offgrid checks again when your connection returns. You can also use **Settings → About & diagnostics → Check for updates**.
 
-When a release is available, a dismissible banner offers **Update to [version]**. One click downloads and verifies the installer, then opens it. Quit Offgrid and drag the new copy into **Applications** to finish; your saved library stays in its separate data folder. Current ad hoc signed builds use this installer flow. Automatic install-and-restart updates require a properly signed release pipeline.
+When a release is available, a dismissible banner offers **Update to [version]**. One click downloads and verifies the matching installer, then opens it. On Mac, quit Offgrid and drag the new copy into **Applications**. On Windows, follow the installer prompts. Your saved library stays in its separate data folder. Updates currently use this installer flow rather than automatic installation.
 
 ### Run from source
 
@@ -75,7 +81,7 @@ npm run build
 npm start
 ```
 
-A desktop session is required. Source/development runs use a system mpv installation: on macOS, `brew install mpv`. Linux users also need mpv for server media and an unlocked credential store such as GNOME Keyring or KWallet. Windows remains incomplete even when launched from source.
+A desktop session is required. Mac source runs use a system mpv installation: `brew install mpv`. Linux users also need mpv for server media and an unlocked credential store such as GNOME Keyring or KWallet. Windows x64 source runs use the same managed player setup as packaged builds. Build a Windows installer on Windows with `npm run dist:win`.
 
 ## Plex and Jellyfin
 
@@ -133,7 +139,7 @@ Before a trip, finish downloads and try playback with your network disconnected.
 | Server works in a browser but not Offgrid | Confirm the local address and port. On macOS, check **Privacy & Security → Local Network**. Development runs may appear as **Electron**. |
 | The local-access check fails | The server may be offline, the address may be wrong, or network access may be blocked. The check reports reachability; it cannot conclusively identify permission denial. |
 | Server credentials cannot be saved | Unlock the system keychain/credential store. On Linux, a usable desktop secret store is required; Offgrid does not fall back to plaintext tokens. |
-| Plex or Jellyfin will not play | Packaged Mac builds include mpv; reinstall the app if its bundled player is missing or damaged. Development runs need system mpv. Windows mpv support has not been implemented yet. |
+| Plex or Jellyfin will not play | Packaged Mac builds include mpv; reinstall if it is missing or damaged. On Windows, reconnect to the internet and refresh the player in Settings to complete or repair setup. Mac/Linux development runs need system mpv. |
 | A download is waiting for storage | Free disk space, remove saved videos, or increase the library limit. For YouTube, retry at a lower quality. Server downloads retain original quality. |
 | YouTube downloads fail | Check connectivity and the yt-dlp/FFmpeg status in Settings. Update the managed tools and retry; some content is unsupported. |
 | Download stopped when the app closed | Reopen **Downloads** and retry the interrupted item. Partial files are cleaned up; completed files remain available. |
@@ -142,12 +148,12 @@ When reporting a bug, include the app version, OS and CPU architecture, provider
 
 ## Platform roadmap
 
-- **Windows:** implement mpv discovery/control and reliable child-process-tree cancellation; replace Mac-specific setup guidance; build and test an installer.
+- **Windows:** broaden hardware/codec and real-server testing, add installer signing, and evaluate native ARM64 support.
 - **Linux:** validate mpv, credential storage, downloads, cancellation, and desktop integration on real distributions; choose and test installer formats.
 - **macOS Intel:** build and validate x64 packages and native playback.
-- **All platforms:** extend the macOS release workflow to other platforms, add broader native UI coverage, and keep Electron/dependencies current. Add developer signing/notarization where appropriate.
+- **All platforms:** add broader native UI coverage and Linux release packaging, and keep Electron/dependencies current. Add developer signing/notarization where appropriate.
 
-Tagged stable versions now build a macOS ARM64 DMG through [GitHub Actions](https://github.com/Matt-Mc/OffGrid/actions/workflows/release.yml), verify bundled playback, and publish installer/checksum/source assets to Releases. Windows and Linux milestones remain planned; untested builds are not supported releases.
+Tagged stable versions build a macOS ARM64 DMG and Windows x64 installer through [GitHub Actions](https://github.com/Matt-Mc/OffGrid/actions/workflows/release.yml). Both platform jobs must pass before publication. Windows assets use `SHA256SUMS-windows`; Mac assets retain `SHA256SUMS` and their bundled runtime sources. Pull requests run both platform test suites and build a downloadable Windows test installer.
 
 ## Contributing
 

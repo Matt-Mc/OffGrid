@@ -13,6 +13,8 @@
     "test:plex-ui": "npm run build && node scripts/smoke-plex-ui.cjs",
     "start": "electron .",
     "dist": "npm run build && electron-builder --mac dmg --arm64 --publish never",
+    "dist:win": "npm run build && electron-builder --win nsis --x64 --publish never",
+    "verify:win": "node scripts/verify-windows.cjs",
     "test:jellyfin-ui": "npm run build && node scripts/smoke-jellyfin-ui.cjs",
     "test:updates-ui": "npm run build && node scripts/smoke-updates-ui.cjs",
     "bundle:mpv": "node scripts/bundle-mpv.cjs",
@@ -64,6 +66,17 @@
           ]
         }
       ]
+    },
+    "win": {
+      "target": [{ "target": "nsis", "arch": ["x64"] }],
+      "artifactName": "Offgrid-${version}-win-${arch}.${ext}",
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": false
     },
     "directories": {
       "output": "release"
