@@ -32,7 +32,7 @@ Built with Electron and React. Early-stage, personal software: feedback and smal
 | **macOS — Apple Silicon (M-series)** | Tested app and ARM64 DMG. Library, queue, playback, and Plex/Jellyfin fixture flows verified. |
 | **macOS — Intel** | Download-tool architecture support exists; no Intel package or runtime validation yet. |
 | **Linux — x64 / ARM64** | Experimental. Download-tool selection and mpv integration exist; installers, desktop integration, and real-machine behavior remain unverified. Server sign-in requires a working desktop secret store. |
-| **Windows — x64** | NSIS installer, managed mpv setup, playback/resume, and process-tree cancellation. First-time player and download-tool setup requires internet. Windows 10 version 1803 or later; Windows 11 recommended for testing. |
+| **Windows — x64** | NSIS installer, managed mpv setup, playback/resume, and process-tree cancellation. First-time player and download-tool setup requires internet. Targets Windows 10/11 x64; local verification uses Windows 11. |
 
 Other architectures are not currently supported. No minimum OS version has been validated for Offgrid itself.
 
@@ -55,7 +55,7 @@ You do not need Node.js to run a packaged app. The installer includes its own mp
 
 Run `Offgrid-<version>-win-x64.exe` from a release that includes Windows assets and follow the setup prompts. The installer preserves your separate library data when updating or uninstalling. Current Windows builds are unsigned.
 
-On first launch, stay online while Offgrid downloads and verifies mpv, yt-dlp, and FFmpeg. Check **Settings** for player and download-component readiness before going offline. Player setup uses Windows' built-in `tar.exe`; if setup fails, reconnect and use **Refresh player** in Settings. Once setup finishes, Plex/Jellyfin originals play in a separate mpv window with saved viewing progress, including offline.
+On first launch, stay online while Offgrid downloads and verifies mpv, yt-dlp, and FFmpeg. Check **Settings** for player and download-component readiness before going offline. Player setup also downloads and verifies the official 7-Zip standalone extractor; if setup fails, reconnect and use **Refresh player** in Settings. Once setup finishes, Plex/Jellyfin originals play in a separate mpv window with saved viewing progress, including offline.
 
 ### App updates
 

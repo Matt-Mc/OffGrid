@@ -17,6 +17,46 @@ const RUNTIME = Object.freeze({
     'd3dcompiler_43.dll': '4b074a3976399dc735484f5d43d04b519b7bdee8ac719d9ab8ed6bd4e6be0345',
   },
 });
+const EXTRACTOR = Object.freeze({
+  url: 'https://github.com/ip7z/7zip/releases/download/26.03/7zr.exe',
+  size: 602624,
+  sha256: 'ad4c82fadcbdf93c03b4fc440f300509c7d60c5c2f4d183e35d9d70d6957037d',
+});
+
+async function downloadPinned(fetch, asset, destination, signal) {
+  let url = asset.url, response;
+  for (let redirects = 0; redirects <= 3; redirects++) {
+    response = await fetch(url, { redirect: 'manual', signal, credentials: 'omit' });
+    if (![301, 302, 303, 307, 308].includes(response.status)) break;
+    await response.body?.cancel();
+    const location = response.headers.get('location');
+    if (!location || redirects === 3) throw new Error('Invalid player redirect.');
+    const next = new URL(location, url);
+    if (next.protocol !== 'https:' || next.username || next.password || next.port || next.hash
+      || !['github.com', 'release-assets.githubusercontent.com'].includes(next.hostname)
+      || (next.hostname === 'github.com' && next.href !== asset.url)) throw new Error('Invalid player redirect.');
+    url = next.href;
+  }
+  if (response.status !== 200 || !response.body) throw new Error('Player download failed.');
+  const file = await fs.open(destination, 'wx');
+  const hash = crypto.createHash('sha256');
+  let size = 0;
+  try {
+    for await (const bytes of response.body) {
+      signal.throwIfAborted();
+      size += bytes.length;
+      if (size > asset.size) throw new Error('Player download too large.');
+      hash.update(bytes);
+      let offset = 0;
+      while (offset < bytes.length) {
+        const { bytesWritten } = await file.write(bytes, offset, bytes.length - offset);
+        if (!bytesWritten) throw new Error('Player download write failed.');
+        offset += bytesWritten;
+      }
+    }
+  } finally { await file.close(); }
+  if (size !== asset.size || hash.digest('hex') !== asset.sha256) throw new Error('Player download verification failed.');
+}
 
 async function hashFile(file) {
   const hash = crypto.createHash('sha256');
@@ -30,7 +70,7 @@ async function verifyDirectory(directory, runtime) {
     if (!(await fs.lstat(file)).isFile() || await hashFile(file) !== hash) throw new Error('Player verification failed.');
   }
 }
-function createManagedMpv({ directory, fetch = globalThis.fetch, extract = promisify(execFile), runtime = RUNTIME, onChange = () => {}, onError = () => {} } = {}) {
+function createManagedMpv({ directory, fetch = globalThis.fetch, extract = promisify(execFile), runtime = RUNTIME, extractor = EXTRACTOR, onChange = () => {}, onError = () => {} } = {}) {
   let pending, controller, disposed = false;
   let value = { available: false, path: null, source: 'managed', message: 'The Windows player needs first-time setup. Connect to the internet and refresh the player.' };
   const status = () => ({ ...value });
@@ -52,43 +92,14 @@ function createManagedMpv({ directory, fetch = globalThis.fetch, extract = promi
           value = { ...value, available: false, path: null, message: 'Setting up the Windows player… Keep Offgrid open and connected to the internet.' };
           await fs.mkdir(directory, { recursive: true });
           stage = await fs.realpath(await fs.mkdtemp(path.join(directory, 'mpv-setup-')));
-          let url = runtime.url, response;
-          for (let redirects = 0; redirects <= 3; redirects++) {
-            response = await fetch(url, { redirect: 'manual', signal, credentials: 'omit' });
-            if (![301, 302, 303, 307, 308].includes(response.status)) break;
-            await response.body?.cancel();
-            const location = response.headers.get('location');
-            if (!location || redirects === 3) throw new Error('Invalid player redirect.');
-            const next = new URL(location, url);
-            if (next.protocol !== 'https:' || next.username || next.password || next.port || next.hash
-              || !['github.com', 'release-assets.githubusercontent.com'].includes(next.hostname)
-              || (next.hostname === 'github.com' && next.href !== runtime.url)) throw new Error('Invalid player redirect.');
-            url = next.href;
-          }
-          if (response.status !== 200 || !response.body) throw new Error('Player download failed.');
           const archive = path.join(stage, 'runtime.7z');
-          const file = await fs.open(archive, 'wx');
-          const hash = crypto.createHash('sha256');
-          let size = 0;
-          try {
-            for await (const bytes of response.body) {
-              signal.throwIfAborted();
-              size += bytes.length;
-              if (size > runtime.size) throw new Error('Player archive too large.');
-              hash.update(bytes);
-              let offset = 0;
-              while (offset < bytes.length) {
-                const { bytesWritten } = await file.write(bytes, offset, bytes.length - offset);
-                if (!bytesWritten) throw new Error('Player archive write failed.');
-                offset += bytesWritten;
-              }
-            }
-          } finally { await file.close(); }
-          if (size !== runtime.size || hash.digest('hex') !== runtime.sha256) throw new Error('Player archive verification failed.');
+          const extractorPath = path.join(stage, '7zr.exe');
+          await downloadPinned(fetch, runtime, archive, signal);
+          await downloadPinned(fetch, extractor, extractorPath, signal);
           signal.throwIfAborted();
-          const tar = path.win32.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe');
-          await extract(tar, ['-xf', archive, '-C', stage, ...Object.keys(runtime.files)], { windowsHide: true, timeout: 30_000, signal });
+          await extract(extractorPath, ['x', archive, `-o${stage}`, '-y', '--', ...Object.keys(runtime.files)], { windowsHide: true, timeout: 30_000, signal });
           await fs.unlink(archive);
+          await fs.unlink(extractorPath);
           await verifyDirectory(stage, runtime);
           signal.throwIfAborted();
           // Only this fixed, application-owned runtime directory is replaced.
@@ -100,7 +111,7 @@ function createManagedMpv({ directory, fetch = globalThis.fetch, extract = promi
         value = { available: true, path: path.join(root, 'mpv.exe'), source: 'managed', message: 'The Windows player is ready for offline playback.' };
       } catch (error) {
         try { onError(error); } catch {}
-        value = { available: false, path: null, source: 'managed', message: 'Windows player setup could not finish. Connect to the internet and refresh the player in Settings. Windows 10 version 1803 or later is required.' };
+        value = { available: false, path: null, source: 'managed', message: 'Windows player setup could not finish. Connect to the internet and refresh the player in Settings.' };
       } finally {
         clearTimeout(timer);
         if (stage) await fs.rm(stage, { recursive: true, force: true }).catch(() => {});

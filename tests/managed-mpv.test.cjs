@@ -12,8 +12,8 @@ async function fixture(t,options={}) {
   const archive=Buffer.from('archive fixture'),binary=Buffer.from('executable fixture');
   const runtime={version:'fixture',url:'https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/test/mpv.7z',size:archive.length,sha256:hash(archive),files:{'mpv.exe':hash(binary)}};
   let fetched=0,extracted=0;
-  const config={directory,runtime,fetch:async()=>{fetched++;return new Response(archive);},extract:async(_cmd,args,opts)=>{
-    extracted++;assert.equal(opts.windowsHide,true);assert.deepEqual(args.slice(4),['mpv.exe']);await fs.writeFile(path.join(args[3],'mpv.exe'),binary);
+  const config={directory,runtime,extractor:runtime,fetch:async()=>{fetched++;return new Response(archive);},extract:async(_cmd,args,opts)=>{
+    extracted++;assert.equal(opts.windowsHide,true);assert.deepEqual(args.slice(5),['mpv.exe']);await fs.writeFile(path.join(args[2].slice(2),'mpv.exe'),binary);
   },...options};
   const manager=createManagedMpv(config);t.after(()=>manager.dispose());
   return {manager,config,directory,get fetched(){return fetched;},get extracted(){return extracted;}};
@@ -21,7 +21,7 @@ async function fixture(t,options={}) {
 test('player setup coalesces callers, verifies extracted files, and survives restart without network',async t=>{
   const f=await fixture(t);
   const first=f.manager.ensure();assert.equal(first,f.manager.ensure());
-  assert.equal((await first).available,true);assert.equal(f.fetched,1);assert.equal(f.extracted,1);
+  assert.equal((await first).available,true);assert.equal(f.fetched,2);assert.equal(f.extracted,1);
   const offline=createManagedMpv({...f.config,fetch:async()=>{throw new Error('offline');}});
   assert.equal((await offline.ensure()).available,true);
   await fs.appendFile(offline.status().path,'tampered');
@@ -31,7 +31,7 @@ test('corrupt archives, foreign redirects and unexpected extracted bytes fail cl
   for(const options of [
     {fetch:async()=>new Response('corrupt')},
     {fetch:async()=>new Response(null,{status:302,headers:{location:'https://evil.example/player.7z'}})},
-    {extract:async(_cmd,args)=>fs.writeFile(path.join(args[3],'mpv.exe'),'wrong binary')},
+    {extract:async(_cmd,args)=>fs.writeFile(path.join(args[2].slice(2),'mpv.exe'),'wrong binary')},
   ]) {
     const f=await fixture(t,options);assert.equal((await f.manager.ensure()).available,false);
     assert.deepEqual(await fs.readdir(f.directory),[]);

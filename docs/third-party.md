@@ -40,6 +40,8 @@ After rebuilding, run `npm run bundle:mpv` in the Offgrid checkout to copy the n
 
 Windows installers do not contain the Mac/Homebrew runtime. On first launch, the Windows x64 app downloads the pinned baseline x86_64 archive directly from [shinchiro's mpv builds](https://github.com/shinchiro/mpv-winbuild-cmake/releases/tag/20260903). Its archive and extracted executable/DLL hashes are recorded in `electron/managed-mpv.cjs`. Only `mpv.exe` and `d3dcompiler_43.dll` are extracted; upstream installer and updater scripts are not run. The downloaded runtime stays in the user's application data folder for offline playback.
 
+Setup also downloads the checksum-pinned `7zr.exe` standalone extractor directly from the [official 7-Zip 26.03 release](https://github.com/ip7z/7zip/releases/tag/26.03). It verifies the extractor before execution and deletes the temporary copy afterward. The same upstream release provides its corresponding source. Neither Windows player nor extractor binaries are included in Offgrid's installer.
+
 See the [upstream build project](https://github.com/shinchiro/mpv-winbuild-cmake) and [mpv copyright/license](https://github.com/mpv-player/mpv/blob/master/Copyright) for that runtime's build and license information. The Mac corresponding-source collection requirements above continue to apply to the bundled Mac runtime.
 
 ## Other dependencies

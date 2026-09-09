@@ -19,11 +19,11 @@ Mac/Linux development runs use an installed mpv for native playback. Windows x64
 
 ### Windows
 
-Use Windows x64 with Node.js 22+ and Windows' built-in `tar.exe` (Windows 10 version 1803 or later). Run `npm run dist:win` for the NSIS installer and `npm run verify:win` for real player setup, offline reuse, named-pipe playback, pause/resume, progress, EOF, and descendant-process cancellation. The native verification creates and removes disposable media; its initial pinned player download requires internet.
+Use Windows x64 with Node.js 22+. Player setup downloads a pinned official 7-Zip standalone extractor, so it does not depend on the compression support in the system archive tool. Run `npm run dist:win` for the NSIS installer and `npm run verify:win` for real player setup, offline reuse, named-pipe playback, pause/resume, progress, EOF, and descendant-process cancellation. The native verification creates and removes disposable media; its initial pinned player download requires internet.
 
 Windows `mpv` starts idle and receives its local file over a random named pipe after event subscriptions are attached. Unix keeps inherited descriptor IPC. The renderer never supplies an executable path, pipe name, or player command. Windows download cancellation awaits `taskkill /T /F` before temporary-file cleanup. A termination failure pauses the queue and preserves working files.
 
-`electron/managed-mpv.cjs` pins the upstream archive URL, size, SHA256, and extracted executable/DLL hashes. When upgrading it, update all pins together, verify the baseline x86_64 build (not x86_64-v3), and run the native checks. Setup extracts only the named executable and DLL, never upstream install/update scripts. No Windows mpv binaries are redistributed in the installer.
+`electron/managed-mpv.cjs` pins the upstream player and extractor URLs, sizes, SHA256 values, and extracted player executable/DLL hashes. When upgrading it, update all pins together, verify the baseline x86_64 build (not x86_64-v3), and run the native checks. Setup verifies the standalone extractor before executing it, extracts only the named player executable and DLL, and deletes the temporary extractor. Upstream player install/update scripts are never run. No Windows mpv binaries are redistributed in the installer.
 
 Some Windows developer machines need Developer Mode or an elevated terminal for electron-builder's downloaded tool archive, which contains unused macOS symlinks. File-symlink tests explicitly skip when Windows denies that privilege; directory-junction coverage still runs. Mac-only Homebrew path/provenance tests run on the Mac CI job.
 
