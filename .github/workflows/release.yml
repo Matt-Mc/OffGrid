@@ -160,5 +160,8 @@ jobs:
           gh release upload "$RELEASE_TAG" ./*.dmg ./*.exe ./*-sources-*.tar.gz ./SHA256SUMS ./SHA256SUMS-windows ./WINDOWS-RELEASE-NOTES.md ./mpv-runtime-manifest.json ./RELEASE-NOTES.md --clobber
           cat RELEASE-NOTES.md WINDOWS-RELEASE-NOTES.md > combined-notes.md
           gh release edit "$RELEASE_TAG" --notes-file combined-notes.md
-          release_id=$(gh api "repos/$GH_REPO/releases/tags/$RELEASE_TAG" --jq .id)
+          # The REST tag endpoint only finds published releases. gh release view
+          # also searches drafts and returns the numeric ID needed by PATCH.
+          release_id=$(gh release view "$RELEASE_TAG" --json databaseId --jq .databaseId)
+          [[ "$release_id" =~ ^[0-9]+$ ]] || { echo 'Invalid release ID'; exit 1; }
           gh api --method PATCH "repos/$GH_REPO/releases/$release_id" -F draft=false -f make_latest=legacy > /dev/null
