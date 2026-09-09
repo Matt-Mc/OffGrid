@@ -138,7 +138,7 @@ node scripts/verify-bundled-mpv.cjs release/mac-arm64/Offgrid.app/Contents/Resou
 
 The custom macOS signing hook adjusts the main executable's Mach-O UUID per app/version and replaces Electron's original signature. It uses a configured Apple identity when available and ad hoc signing otherwise. Local ad hoc builds are not notarized and do not establish stable distribution identity across updates. Installer builds must retain the local-network usage description in `package.json`.
 
-Windows and Linux installer targets and native verification remain roadmap work. Merely producing an executable on another OS is not sufficient to call it supported.
+Windows x64 has installer and native verification jobs. Linux packaging remains roadmap work.
 
 ## Preparing a GitHub release
 
@@ -150,18 +150,24 @@ Windows and Linux installer targets and native verification remain roadmap work.
 
 ## Automated releases
 
-[Build macOS release](../.github/workflows/release.yml) runs on stable version tags (`v0.3.0`, for example), or manually from the Actions page. It uses a macOS 15 ARM64 runner, installs build tools, runs the backend tests, bundles mpv and matching sources, verifies native decoding/control, builds and verifies the DMG, then uploads checksummed assets. Only tag runs publish to GitHub Releases; manual runs provide temporary workflow artifacts.
+[Build desktop release](../.github/workflows/release.yml) automatically runs when a PR is merged into `main`. Closing a PR without merging does nothing. It also accepts stable version tags and manual runs from Actions.
 
-To release a new patch from a clean, tested `main` checkout:
+Each merged PR reserves the next stable patch version (for example, `v0.3.1` → `v0.3.2`). An explicit package version above existing tags is honored for minor/major releases. The helper updates `package.json` and both root lockfile version fields in a **release-only commit** whose parent is the exact merged commit, then pushes an annotated tag. It does not push version commits to `main` or require a personal access token. The tag's `Offgrid-Merge` marker makes failed-run retries reuse their original version. Concurrent tag collisions are retried without force-pushing or overwriting tags. Reserved versions from failed builds can leave gaps.
+
+Both platform jobs check out that same release commit. macOS ARM64 bundles mpv and matching sources, verifies decoding/control, and builds/verifies the DMG. Windows x64 verifies managed-player setup/playback, builds the NSIS installer, and checks packaged Plex/Jellyfin UI and credential storage. Publication requires both jobs to succeed and both checksum files to verify. Assets are uploaded to a draft first, then published together. Already-published releases are left untouched. GitHub selects Latest using its release-date/semantic-version policy rather than whichever build finishes last.
+
+The merged-PR trigger uses `pull_request_target: closed` so a merged contribution from a fork can use the repository token. Its merged check and checkout use only the merged commit; the helper also verifies that commit is contained in remote `main`. It never executes the unmerged PR head. Only preparation and publication have `contents: write`; platform builds have read-only permissions.
+
+GitHub-token tag pushes do not trigger another workflow, so version preparation and both builds stay in the same run. A manual run on a branch builds temporary artifacts without publishing. Run on an existing version tag to rebuild/retry that tagged release. To create an explicit version outside the normal merged-PR flow, update both package and lockfile versions in a reviewed commit and push a matching tag:
 
 ```bash
-npm version patch
-git push origin main --follow-tags
+git tag v0.4.0
+git push origin v0.4.0
 ```
 
-The tag must match `package.json`; prerelease version strings are rejected by this stable-release workflow. The publication job has `contents: write`, while the build job only has read access. No personal access token is needed: publishing uses the job's `GITHUB_TOKEN`. Actions must be enabled in the repository. Binaries are ad hoc signed; no Apple signing secrets are configured by this workflow.
+The tag must match `package.json`; prerelease version strings are rejected by this stable-release workflow. No personal access token is needed: publishing uses the job's `GITHUB_TOKEN`. Actions must be enabled in the repository. Mac binaries are ad hoc signed and Windows installers are unsigned; no signing secrets are configured by this workflow.
 
-A release is published with its DMG, SHA256 checksums, staged runtime manifest, and corresponding-source archive. A failed source collection or verification blocks publication. If uploading a new release fails, it remains a draft; a rerun can replace draft assets and finish publication. Already-published versions are never overwritten—bump the version for another build. GitHub chooses the Latest release automatically from release dates and versions.
+A release contains the Mac DMG, Windows installer, both checksum files, runtime manifest, and Mac corresponding-source archive. A failed source collection or verification blocks publication. If uploading fails, the release remains a draft; a rerun can replace draft assets and finish publication. Already-published versions are never overwritten.
 
 The release uses the Homebrew bottles available on the runner and archives their exact installed recipes and matching sources. This records the inputs actually shipped; it does not claim that rerunning the workflow later selects the same bottles or produces byte-identical binaries.
 
