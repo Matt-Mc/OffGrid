@@ -1,4 +1,5 @@
 'use strict';
+const { releaseTarget } = require('./release-target.cjs');
 
 const RELEASE_API = 'https://api.github.com/repos/Matt-Mc/OffGrid/releases/latest';
 const REPOSITORY_URL = 'https://github.com/Matt-Mc/OffGrid';
@@ -21,7 +22,9 @@ function compareVersions(left, right) {
   return 0;
 }
 
-function validateRelease(data, currentVersion, { requireRuntimeManifest = false } = {}) {
+function validateRelease(data, currentVersion, { requireRuntimeManifest = false, platform = process.platform, arch = process.arch } = {}) {
+  const target = releaseTarget(platform, arch);
+  if (!target) throw new Error('Unsupported release platform.');
   if (!data || data.draft !== false || data.prerelease !== false || typeof data.tag_name !== 'string') {
     throw new Error('Invalid release metadata.');
   }
@@ -51,8 +54,8 @@ function validateRelease(data, currentVersion, { requireRuntimeManifest = false 
   };
   const release = {
     version, tag: `v${version}`, url,
-    asset: asset(`Offgrid-${version}-arm64.dmg`, 1024 ** 3 - 1, 512),
-    checksums: asset('SHA256SUMS', 64 * 1024),
+    asset: asset(`Offgrid-${version}-${target.suffix}`, 1024 ** 3 - 1, 512),
+    checksums: asset(target.checksums, 64 * 1024),
   };
   if (requireRuntimeManifest) release.runtimeManifest = asset('mpv-runtime-manifest.json', MAX_METADATA_BYTES);
   return release;
@@ -121,8 +124,9 @@ async function readRuntimeManifest(fetchRelease, url, signal) {
 
 function createAppUpdates(options = {}) {
   const currentVersion = options.currentVersion;
-  const supported = (options.platform || process.platform) === 'darwin'
-    && (options.arch || process.arch) === 'arm64' && Boolean(parseVersion(currentVersion));
+  const platform = options.platform || process.platform;
+  const arch = options.arch || process.arch;
+  const supported = Boolean(releaseTarget(platform, arch)) && Boolean(parseVersion(currentVersion));
   const fetchRelease = options.fetch || globalThis.fetch;
   const now = options.now || Date.now;
   const timeoutMs = Number.isFinite(options.timeoutMs) && options.timeoutMs > 0
@@ -163,9 +167,9 @@ function createAppUpdates(options = {}) {
       });
       if (signal.aborted) throw new Error('Release check cancelled.');
       const release = validateRelease(await readMetadata(response, signal), currentVersion, {
-        requireRuntimeManifest: options.systemVersion !== undefined,
+        platform, arch, requireRuntimeManifest: platform === 'darwin' && options.systemVersion !== undefined,
       });
-      if (release && options.systemVersion !== undefined) {
+      if (release && platform === 'darwin' && options.systemVersion !== undefined) {
         const manifest = await readRuntimeManifest(fetchRelease, release.runtimeManifest.url, signal);
         const minimum = osVersion(manifest.minimumMacOS);
         const system = osVersion(options.systemVersion);

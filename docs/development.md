@@ -15,7 +15,21 @@ npm run dev
 
 `npm run dev` starts Vite on loopback and launches Electron when the server is ready. `npm run build` only builds the renderer; `npm start` runs Electron against that build.
 
-Development runs use an installed mpv for native playback. Packaged Mac builds require the app-private runtime described below. The general UI smoke test also needs an `ffmpeg` executable on PATH to generate its sample clip. The managed FFmpeg inside a normal Offgrid installation does not automatically satisfy that test requirement.
+Mac/Linux development runs use an installed mpv for native playback. Windows x64 runs provision a pinned upstream player into the app data tools folder. Packaged Mac builds require the app-private runtime described below. The general UI smoke test also needs an `ffmpeg` executable on PATH to generate its sample clip. The managed FFmpeg inside a normal Offgrid installation does not automatically satisfy that test requirement.
+
+### Windows
+
+Use Windows x64 with Node.js 22+. Player setup downloads a pinned official 7-Zip standalone extractor, so it does not depend on the compression support in the system archive tool. Run `npm run dist:win` for the NSIS installer and `npm run verify:win` for real player setup, offline reuse, named-pipe playback, pause/resume, progress, EOF, and descendant-process cancellation. The native verification creates and removes disposable media; its initial pinned player download requires internet.
+
+Windows `mpv` starts idle and receives its local file over a random named pipe after event subscriptions are attached. Unix keeps inherited descriptor IPC. The renderer never supplies an executable path, pipe name, or player command. Windows download cancellation awaits `taskkill /T /F` before temporary-file cleanup. A termination failure pauses the queue and preserves working files.
+
+The private player folder also includes a checksum-pinned x64 Vulkan loader from LunarG, so mpv can start without a preinstalled Vulkan runtime. Only the loader and its license are read from that verified ZIP, using Windows PowerShell's built-in ZIP support. The standalone 7-Zip extractor handles the player archive's LZMA compression, which older Windows system tar builds lack.
+
+`electron/managed-mpv.cjs` pins the upstream player and extractor URLs, sizes, SHA256 values, and extracted player executable/DLL hashes. When upgrading it, update all pins together, verify the baseline x86_64 build (not x86_64-v3), and run the native checks. Setup verifies the standalone extractor before executing it, extracts only the named player executable and DLL, and deletes the temporary extractor. Upstream player install/update scripts are never run. No Windows mpv binaries are redistributed in the installer.
+
+Some Windows developer machines need Developer Mode or an elevated terminal for electron-builder's downloaded tool archive, which contains unused macOS symlinks. File-symlink tests explicitly skip when Windows denies that privilege; directory-junction coverage still runs. Mac-only Homebrew path/provenance tests run on the Mac CI job.
+
+`SHA256SUMS-windows` covers the Windows installer independently of the Mac checksum file. The update downloader requires the exact platform filename, checksum, size, and a valid PE header before opening a Windows installer. No signing certificate is configured yet.
 
 ## Code map
 

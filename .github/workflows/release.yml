@@ -1,4 +1,4 @@
-name: Build macOS release
+name: Build desktop release
 
 on:
   push:
@@ -61,9 +61,37 @@ jobs:
           retention-days: 7
           compression-level: 0
 
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run verify:win
+      - run: npm run dist:win
+      - name: Verify packaged Windows server UI
+        run: |
+          $env:OFFGRID_SMOKE_APP = Join-Path $PWD 'release/win-unpacked/Offgrid.exe'
+          node scripts/smoke-plex-ui.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/smoke-jellyfin-ui.cjs
+      - run: node scripts/release-windows-assets.cjs
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: offgrid-windows-x64
+          path: release/publish-windows/*
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [build, windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -71,6 +99,10 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: offgrid-macos-arm64
+          path: assets
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: offgrid-windows-x64
           path: assets
       - name: Publish verified release
         env:
@@ -80,13 +112,14 @@ jobs:
         working-directory: assets
         run: |
           sha256sum --check SHA256SUMS
+          sha256sum --check SHA256SUMS-windows
           if gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft > existing-release.txt; then
             if [ "$(cat existing-release.txt)" != true ]; then
               echo 'This version is already published. Bump the version instead of replacing its binaries.'
               exit 1
             fi
-            gh release upload "$RELEASE_TAG" ./*.dmg ./*-sources-*.tar.gz ./SHA256SUMS ./mpv-runtime-manifest.json ./RELEASE-NOTES.md --clobber
+            gh release upload "$RELEASE_TAG" ./*.dmg ./*.exe ./*-sources-*.tar.gz ./SHA256SUMS ./SHA256SUMS-windows ./WINDOWS-RELEASE-NOTES.md ./mpv-runtime-manifest.json ./RELEASE-NOTES.md --clobber
             gh release edit "$RELEASE_TAG" --draft=false --notes-file RELEASE-NOTES.md
           else
-            gh release create "$RELEASE_TAG" ./*.dmg ./*-sources-*.tar.gz ./SHA256SUMS ./mpv-runtime-manifest.json ./RELEASE-NOTES.md --verify-tag --title "Offgrid $RELEASE_TAG" --notes-file RELEASE-NOTES.md
+            gh release create "$RELEASE_TAG" ./*.dmg ./*.exe ./*-sources-*.tar.gz ./SHA256SUMS ./SHA256SUMS-windows ./WINDOWS-RELEASE-NOTES.md ./mpv-runtime-manifest.json ./RELEASE-NOTES.md --verify-tag --title "Offgrid $RELEASE_TAG" --notes-file RELEASE-NOTES.md
           fi

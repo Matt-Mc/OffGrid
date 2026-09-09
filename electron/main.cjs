@@ -13,6 +13,8 @@ const { PlexConnection } = require('./plex-connection.cjs');
 const { JellyfinConnection } = require('./jellyfin-connection.cjs');
 const { normalizeServerUrl: normalizeJellyfinUrl } = require('./jellyfin-client.cjs');
 const { createMpvPlayer } = require('./mpv-player.cjs');
+const { createManagedMpv } = require('./managed-mpv.cjs');
+let managedMpv;
 const { requestLocalNetworkAccess } = require('./local-network.cjs');
 const { createAppUpdates } = require('./app-updates.cjs');
 const { createUpdateDownload } = require('./update-download.cjs');
@@ -66,7 +68,7 @@ async function awaitWhileActive(active, start) {
 }
 function trackedSpawn(id, command, args) {
   assertActive(id);
-  const child = spawn(command, args, { detached: process.platform !== "win32" });
+  const child = spawn(command, args, { detached: process.platform !== "win32", windowsHide: true });
   const active = queue?.active?.id === id ? queue.active : null;
   active?.children.add(child);
   child.on("close", () => active?.children.delete(child));
@@ -320,7 +322,7 @@ function releaseAssetName() {
 
 function commandVersion(command) {
 	return new Promise((resolve) => {
-		const child = spawn(command, ["--version"]);
+		const child = spawn(command, ["--version"], { windowsHide: true });
 		let output = "";
 		child.stdout.on("data", (chunk) => {
 			output += chunk.toString();
@@ -683,7 +685,7 @@ function runMetadata(
 		if (quality) args.push("--format", formatForQuality(quality));
 		if (includeComments) args.push("--write-comments");
 		args.push(url);
-		const child = jobId ? trackedSpawn(jobId, ytdlpCommand, args) : spawn(ytdlpCommand, args);
+		const child = jobId ? trackedSpawn(jobId, ytdlpCommand, args) : spawn(ytdlpCommand, args, { windowsHide: true });
 		let stdout = "";
 		let stderr = "";
 		child.stdout.on("data", (chunk) => {
@@ -734,7 +736,7 @@ function runChannelFeed(channelUrl, ytdlpCommand, count = settings.recentVideoCo
 			"--no-warnings",
 			"--ignore-errors",
 			feedUrl,
-		]);
+		], { windowsHide: true });
 		let stdout = "";
 		let stderr = "";
 		child.stdout.on("data", (chunk) => {
@@ -1279,7 +1281,10 @@ app.whenReady().then(() => {
     open:async()=>{throw new Error('Native playback is disabled in isolated UI tests.');},
     stop:async()=>{}, control:async()=>{},
   } : createMpvPlayer({
-    bundledPath: app.isPackaged && process.resourcesPath ? path.join(process.resourcesPath,'mpv','bin','mpv') : undefined,
+    bundledPath: app.isPackaged && process.platform === 'darwin' && process.resourcesPath ? path.join(process.resourcesPath,'mpv','bin','mpv') : undefined,
+    ...(process.platform === 'win32' && process.arch === 'x64' ? {
+      managedStatus: (managedMpv = createManagedMpv({directory:toolsDirectory,onChange:status=>broadcast('player:availability',status)})).status,
+    } : {}),
     onProgress:(id,progress)=>{if(library.some(video=>video.id===id)) savePlayback(id,progress);},
     onState:state=>broadcast('player:update',state),
   });
@@ -1347,7 +1352,7 @@ app.whenReady().then(() => {
     await shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork');
     return {opened:true};
   });
-  ipcMain.handle('player:status',()=>player.status());
+  ipcMain.handle('player:status',()=>{void managedMpv?.ensure(); return player.status();});
   ipcMain.handle('player:state',()=>player.state());
   ipcMain.handle('player:open',(_event,id)=>{
     const video=library.find(item=>item.id===id);
@@ -1475,7 +1480,7 @@ app.whenReady().then(() => {
     sendToolUpdate({status:"ready",version:"test",message:"Download components available in test mode"});
     sendFfmpegUpdate({status:"ready",version:"test",message:"FFmpeg available in test mode"});
   } else {
-    updateManagedYtdlp().catch(()=>{}); updateManagedFfmpeg().catch(()=>{});
+    updateManagedYtdlp().catch(()=>{}); updateManagedFfmpeg().catch(()=>{}); managedMpv?.ensure();
     setInterval(()=>updateManagedFfmpeg().catch(()=>{}),UPDATE_INTERVAL_MS);
     syncSubscriptions(null,{scheduled:true}).catch(()=>{});
     setInterval(()=>syncSubscriptions(null,{scheduled:true}).catch(()=>{}),60_000);
@@ -1492,10 +1497,15 @@ app.on("window-all-closed", () => {
 	if (process.platform !== "darwin") app.quit();
 });
 
-app.on("before-quit", () => {
+let finishingQuit = false;
+app.on("before-quit", event => {
+  if (finishingQuit) return;
+  event?.preventDefault?.();
   appUpdates?.dispose();
-  void updateDownload?.dispose();
   localAccessController?.abort();
-  void player?.stop();
   if(queue) {queue.shuttingDown=true; queue.active?.stop("error","Offgrid closed before this download finished. Retry to start again."); queue.persist();}
+  Promise.allSettled([updateDownload?.dispose(), managedMpv?.dispose(), player?.stop(), queue?.active?.done]).finally(() => {
+    finishingQuit = true;
+    app.quit();
+  });
 });
