@@ -30,7 +30,7 @@ async function verifyDirectory(directory, runtime) {
     if (!(await fs.lstat(file)).isFile() || await hashFile(file) !== hash) throw new Error('Player verification failed.');
   }
 }
-function createManagedMpv({ directory, fetch = globalThis.fetch, extract = promisify(execFile), runtime = RUNTIME, onChange = () => {} } = {}) {
+function createManagedMpv({ directory, fetch = globalThis.fetch, extract = promisify(execFile), runtime = RUNTIME, onChange = () => {}, onError = () => {} } = {}) {
   let pending, controller, disposed = false;
   let value = { available: false, path: null, source: 'managed', message: 'The Windows player needs first-time setup. Connect to the internet and refresh the player.' };
   const status = () => ({ ...value });
@@ -98,7 +98,8 @@ function createManagedMpv({ directory, fetch = globalThis.fetch, extract = promi
           stage = null;
         }
         value = { available: true, path: path.join(root, 'mpv.exe'), source: 'managed', message: 'The Windows player is ready for offline playback.' };
-      } catch {
+      } catch (error) {
+        try { onError(error); } catch {}
         value = { available: false, path: null, source: 'managed', message: 'Windows player setup could not finish. Connect to the internet and refresh the player in Settings. Windows 10 version 1803 or later is required.' };
       } finally {
         clearTimeout(timer);

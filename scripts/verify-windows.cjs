@@ -18,7 +18,7 @@ const waitFor = async predicate => {
 async function verify() {
   if (process.platform !== 'win32' || process.arch !== 'x64') throw new Error('Run on Windows x64.');
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'offgrid-windows-'));
-  const managed = createManagedMpv({ directory: path.join(temporary, 'tools') });
+  const managed = createManagedMpv({ directory: path.join(temporary, 'tools'), onError: error => console.error('Player setup:', error) });
   let player, tree;
   try {
     const installation = await managed.ensure();
