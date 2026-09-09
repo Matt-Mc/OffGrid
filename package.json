@@ -1,6 +1,6 @@
 {
   "name": "offgrid",
-  "version": "0.3.1",
+  "version": "0.3.4",
   "description": "A quiet, local library for watching authorized videos offline.",
   "author": "Offgrid",
   "main": "electron/main.cjs",
@@ -68,7 +68,14 @@
       ]
     },
     "win": {
-      "target": [{ "target": "nsis", "arch": ["x64"] }],
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
       "artifactName": "Offgrid-${version}-win-${arch}.${ext}",
       "icon": "build/icon.png"
     },
