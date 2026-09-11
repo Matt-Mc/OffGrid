@@ -73,11 +73,10 @@ export function Library({
   return <>
     <header className="page-header">
       <div>
-        <p className="eyebrow">YOUR OFFLINE COLLECTION</p>
         <h1>Library</h1>
-        <p>
-          {videos.length ? `${videos.length} ${videos.length === 1 ? 'video' : 'videos'} ready to watch · ${formatBytes(videos.reduce((sum, video) => sum + (video.sizeBytes || 0), 0))}` : 'A little preparation. A whole trip of good watching.'}
-        </p>
+        {videos.length > 0 && <p>
+          {`${videos.length} ${videos.length === 1 ? 'video' : 'videos'} ready to watch · ${formatBytes(videos.reduce((sum, video) => sum + (video.sizeBytes || 0), 0))}`}
+        </p>}
       </div>
       <button className="primary-button" onClick={onAdd}><Icon name="plus" size={16} /> Add video</button>
     </header>

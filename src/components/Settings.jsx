@@ -110,9 +110,7 @@ export function Settings({
   return <>
     <header className="page-header">
       <div>
-        <p className="eyebrow">MAKE YOURSELF AT HOME</p>
         <h1>Settings</h1>
-        <p>Your defaults for a library that travels well.</p>
       </div>
       <span className="keyboard-hint">⌘ ,</span>
     </header>

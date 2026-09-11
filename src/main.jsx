@@ -264,7 +264,6 @@ function App() {
         </span>
         <span>Offgrid</span>
       </div>
-      <p className="sidebar-label">YOUR SPACE</p>
       <nav className="primary-nav" aria-label="Main navigation">
         {[["library", "Library", videos.length], ["downloads", "Downloads", activeCount], ["following", "Following", subscriptions.length], ["servers", "Servers", 0]].map(([destination, label, count]) => <button key={destination} className={`nav-item ${view === destination || destination === 'library' && view === 'player' ? 'active' : ''}`} aria-current={view === destination || destination === 'library' && view === 'player' ? 'page' : undefined} onClick={() => setView(destination)}>
           <Icon name={destination === 'downloads' ? 'download' : destination === 'following' ? 'follow' : destination === 'servers' ? 'folder' : destination} />
@@ -279,7 +278,7 @@ function App() {
       <div className="sidebar-bottom">
         <div className={`connection-state ${online ? '' : 'offline'}`}>
           <span className="connection-dot" />
-          {online ? 'Ready for your next trip' : 'Offline · library available'}
+          {online ? 'Online' : 'Offline · library available'}
         </div>
         <button className="sidebar-storage" onClick={manageStorage}>
           <span>

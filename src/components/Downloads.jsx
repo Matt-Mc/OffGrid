@@ -170,9 +170,7 @@ export function Downloads({
   return <>
     <header className="page-header">
       <div>
-        <p className="eyebrow">PREPARE FOR YOUR NEXT TRIP</p>
         <h1>Downloads</h1>
-        <p>Add a link now. Watch wherever you end up.</p>
       </div>
       {queue.jobs.length > 0 && <button className="secondary-button" disabled={queueBusy} onClick={toggleQueue}>
         {queue.paused ? 'Resume queue' : 'Stop after current'}
