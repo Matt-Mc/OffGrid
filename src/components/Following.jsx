@@ -140,9 +140,7 @@ export function Following({
   return <>
     <header className="page-header">
       <div>
-        <p className="eyebrow">KEEP YOUR FAVORITES CLOSE</p>
         <h1>Following</h1>
-        <p>Fresh videos from the channels you come back to.</p>
       </div>
       <button className="primary-button" onClick={() => setShowForm(!showForm)} aria-expanded={showForm}><Icon name="plus" size={16} /> Follow channel</button>
     </header>

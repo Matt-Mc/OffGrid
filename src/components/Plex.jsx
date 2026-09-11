@@ -187,7 +187,7 @@ function ServerBrowser({ provider, onDownloads, providerControls }) {
   </section>;
   return <>
     <header className="page-header">
-      <div><p className="eyebrow">FROM YOUR HOME SERVER</p><h1>{service.name}</h1><p>Save movies and episodes before you head out.</p></div>
+      <div><h1>{service.name}</h1></div>
       {config?.configured && <button className="secondary-button" onClick={onDownloads}><Icon name="download" size={16} /> View downloads</button>}
     </header>
     {providerControls}
