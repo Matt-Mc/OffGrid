@@ -4,6 +4,7 @@ const fs = require('node:fs/promises');
 const { constants } = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { releaseTarget } = require('./release-target.cjs');
 
 const MAX_INSTALLER_BYTES = 1024 ** 3;
 const MAX_CHECKSUM_BYTES = 64 * 1024;
@@ -29,12 +30,14 @@ function validURL(value, expected) {
   return value;
 }
 
-function normalizeRelease(release) {
+function normalizeRelease(release, platform = process.platform, arch = process.arch) {
+  const target = releaseTarget(platform, arch);
+  if (!target) throw failure('invalid');
   if (!release || typeof release.version !== 'string' || !/^\d+\.\d+\.\d+$/.test(release.version)) throw failure('invalid');
   const version = release.version;
   const tag = `v${version}`;
-  const name = `Offgrid-${version}-arm64.dmg`;
-  if (release.tag !== tag || release.asset?.name !== name || release.checksums?.name !== 'SHA256SUMS') throw failure('invalid');
+  const name = `Offgrid-${version}-${target.suffix}`;
+  if (release.tag !== tag || release.asset?.name !== name || release.checksums?.name !== target.checksums) throw failure('invalid');
   const size = release.asset.size;
   if (!Number.isSafeInteger(size) || size < 512 || size >= MAX_INSTALLER_BYTES) throw failure('invalid');
   const checksumSize = release.checksums.size;
@@ -45,7 +48,7 @@ function normalizeRelease(release) {
     version, tag,
     url: validURL(release.url, `${RELEASE_ROOT}/tag/${tag}`),
     asset: { name, size, digest: digest?.toLowerCase(), url: validURL(release.asset.url, `${RELEASE_ROOT}/download/${tag}/${name}`) },
-    checksums: { name: 'SHA256SUMS', size: checksumSize, url: validURL(release.checksums.url, `${RELEASE_ROOT}/download/${tag}/SHA256SUMS`) },
+    checksums: { name: target.checksums, size: checksumSize, url: validURL(release.checksums.url, `${RELEASE_ROOT}/download/${tag}/${target.checksums}`) },
   };
 }
 
@@ -147,24 +150,24 @@ async function verifyCached(cached, signal) {
   try {
     // Refuse a replaced cache directory or a symlink in place of the installer.
     if (await fs.realpath(cached.directory) !== cached.directory) throw failure('checksum');
-    file = await fs.open(cached.path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    if (!(await fs.lstat(cached.path)).isFile() || await fs.realpath(cached.path) !== cached.path) throw failure('checksum');
+    file = await fs.open(cached.path, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
     const stat = await file.stat();
     if (!stat.isFile() || stat.size !== cached.size) throw failure('checksum');
     const hash = crypto.createHash('sha256');
     const buffer = Buffer.alloc(64 * 1024);
     let position = 0;
-    let tail = Buffer.alloc(0);
     while (position < cached.size) {
       aborted(signal);
       const { bytesRead } = await file.read(buffer, 0, Math.min(buffer.length, cached.size - position), position);
       if (!bytesRead) throw failure('checksum');
       const chunk = buffer.subarray(0, bytesRead);
       hash.update(chunk);
-      tail = chunk.length >= 512 ? Buffer.from(chunk.subarray(-512)) : Buffer.concat([tail, chunk]).subarray(-512);
       position += bytesRead;
     }
     const after = await file.stat();
-    if (after.size !== cached.size || after.mtimeMs !== stat.mtimeMs || hash.digest('hex') !== cached.hash || tail.toString('ascii', 0, 4) !== 'koly') throw failure('checksum');
+    if (after.size !== cached.size || after.mtimeMs !== stat.mtimeMs || hash.digest('hex') !== cached.hash) throw failure('checksum');
+    await verifyFormat(file, cached.format, cached.size);
   } catch (error) {
     if (signal.aborted) throw signal.reason;
     throw failure('checksum');
@@ -173,7 +176,26 @@ async function verifyCached(cached, signal) {
   }
 }
 
-function createUpdateDownload({ directory, fetch = globalThis.fetch, openPath, onChange = () => {}, freeBytes, timeoutMs = MAX_TIMEOUT_MS } = {}) {
+async function verifyFormat(file, format, size) {
+  if (format === 'dmg') {
+    const trailer = Buffer.alloc(4);
+    await file.read(trailer, 0, 4, size - 512);
+    if (trailer.toString('ascii') !== 'koly') throw failure('checksum');
+  } else {
+    const header = Buffer.alloc(64);
+    await file.read(header, 0, 64, 0);
+    const offset = header.readUInt32LE(60);
+    if (header.toString('ascii', 0, 2) !== 'MZ' || offset < 64 || offset > size - 6) throw failure('checksum');
+    const signature = Buffer.alloc(6);
+    await file.read(signature, 0, 6, offset);
+    // NSIS installers use an x86 launcher, including for x64 applications.
+    if (signature.readUInt32LE(0) !== 0x4550 || ![0x14c, 0x8664].includes(signature.readUInt16LE(4))) throw failure('checksum');
+  }
+}
+
+function createUpdateDownload({ directory, fetch = globalThis.fetch, openPath, onChange = () => {}, freeBytes, timeoutMs = MAX_TIMEOUT_MS, platform = process.platform, arch = process.arch } = {}) {
+  const target = releaseTarget(platform, arch);
+  const openedMessage = platform === 'win32' ? 'Installer opened. Follow the setup prompts to finish updating Offgrid.' : 'Installer opened. Drag Offgrid into Applications to finish updating.';
   if (typeof directory !== 'string' || !path.isAbsolute(directory) || typeof fetch !== 'function' || typeof openPath !== 'function') throw new TypeError('An update directory, fetch and installer opener are required.');
   let state = { state: 'idle', version: null, downloadedBytes: 0, totalBytes: 0, progress: 0, message: '' };
   let active;
@@ -188,7 +210,7 @@ function createUpdateDownload({ directory, fetch = globalThis.fetch, openPath, o
   function download(input) {
     if (disposed) return Promise.reject(failure('cancelled'));
     let release;
-    try { release = normalizeRelease(input); } catch { return Promise.reject(failure('invalid')); }
+    try { release = normalizeRelease(input, platform, arch); } catch { return Promise.reject(failure('invalid')); }
     if (active) return active.promise;
     const reusable = state.state === 'ready' && state.version === release.version ? cached : null;
     const controller = new AbortController();
@@ -211,7 +233,7 @@ function createUpdateDownload({ directory, fetch = globalThis.fetch, openPath, o
           clearTimeout(deadline);
           if (await openPath(reusable.path)) throw failure('open');
           opened = true;
-          change({ state: 'ready', downloadedBytes: release.asset.size, progress: 1, message: 'Installer opened. Drag Offgrid into Applications to finish updating.' });
+          change({ state: 'ready', downloadedBytes: release.asset.size, progress: 1, message: openedMessage });
           return status();
         }
         await fs.mkdir(directory, { recursive: true, mode: 0o700 });
@@ -229,7 +251,7 @@ function createUpdateDownload({ directory, fetch = globalThis.fetch, openPath, o
         workingDirectory = await fs.realpath(await fs.mkdtemp(path.join(directory, 'offgrid-update-')));
         aborted(signal);
         const partialPath = path.join(workingDirectory, `${release.asset.name}.partial`);
-        file = await fs.open(partialPath, 'wx', 0o600);
+        file = await fs.open(partialPath, 'wx+', 0o600);
         const response = await request(fetch, release.asset.url, signal);
         const lengthHeader = response.headers.get('content-length');
         if (lengthHeader !== null && (!/^\d+$/.test(lengthHeader) || Number(lengthHeader) !== release.asset.size)) {
@@ -238,10 +260,8 @@ function createUpdateDownload({ directory, fetch = globalThis.fetch, openPath, o
         }
         const hash = crypto.createHash('sha256');
         let downloadedBytes = 0;
-        let tail = Buffer.alloc(0);
         await readBody(response, { signal, limit: release.asset.size, consume: async chunk => {
           hash.update(chunk);
-          tail = chunk.length >= 512 ? Buffer.from(chunk.subarray(-512)) : Buffer.concat([tail, chunk]).subarray(-512);
           let written = 0;
           while (written < chunk.length) {
             aborted(signal);
@@ -252,7 +272,8 @@ function createUpdateDownload({ directory, fetch = globalThis.fetch, openPath, o
           downloadedBytes += chunk.length;
           change({ downloadedBytes, progress: downloadedBytes / release.asset.size });
         } });
-        if (downloadedBytes !== release.asset.size || hash.digest('hex') !== expected || tail.toString('ascii', 0, 4) !== 'koly') throw failure('checksum');
+        if (downloadedBytes !== release.asset.size || hash.digest('hex') !== expected) throw failure('checksum');
+        await verifyFormat(file, target.format, release.asset.size);
         await file.sync();
         await file.close();
         file = null;
@@ -268,8 +289,8 @@ function createUpdateDownload({ directory, fetch = globalThis.fetch, openPath, o
         const error = await openPath(installerPath);
         if (error) throw failure('open');
         opened = true;
-        cached = { path: installerPath, directory: workingDirectory, hash: expected, size: release.asset.size };
-        change({ state: 'ready', progress: 1, message: 'Installer opened. Drag Offgrid into Applications to finish updating.' });
+        cached = { path: installerPath, directory: workingDirectory, hash: expected, size: release.asset.size, format: target.format };
+        change({ state: 'ready', progress: 1, message: openedMessage });
       } catch (error) {
         cached = null;
         const code = signal.aborted ? signal.reason?.updateCode : error?.updateCode;

@@ -26,6 +26,7 @@ async function fixture(t, options = {}) {
   const opened = [];
   const states = [];
   const download = createUpdateDownload({
+    platform: 'darwin', arch: 'arm64',
     directory,
     fetch: async (url, opts) => {
       requests.push({ url, opts });
@@ -49,7 +50,7 @@ test('downloads and verifies the exact release before opening a privately create
   assert.equal(f.opened.length, 1);
   assert.deepEqual(f.opened[0].data, f.data);
   assert.equal(path.basename(f.opened[0].file), f.release.asset.name);
-  assert.equal((await fs.stat(f.opened[0].file)).mode & 0o777, 0o600);
+  if (process.platform !== 'win32') assert.equal((await fs.stat(f.opened[0].file)).mode & 0o777, 0o600);
   assert.equal(f.requests.length, 2);
   for (const { opts } of f.requests) {
     assert.equal(opts.redirect, 'manual');
@@ -232,7 +233,8 @@ test('reopening refuses a cached installer replaced with a symlink even when the
   const target = path.join(f.directory, 'external.dmg');
   await fs.writeFile(target, f.data);
   await fs.unlink(f.opened[0].file);
-  await fs.symlink(target, f.opened[0].file);
+  try { await fs.symlink(target, f.opened[0].file); }
+  catch (error) { if (process.platform === 'win32' && error.code === 'EPERM') return t.skip('File symlinks require Windows Developer Mode.'); throw error; }
   assert.equal((await f.download.download(f.release)).state, 'error');
   assert.equal(f.opened.length, 1);
   assert.deepEqual(await fs.readFile(target), f.data);
@@ -244,7 +246,7 @@ test('reopens verified installers when the supplied cache root has a legitimate 
   const actual = path.join(root, 'actual');
   const alias = path.join(root, 'alias');
   await fs.mkdir(actual);
-  await fs.symlink(actual, alias, 'dir');
+  await fs.symlink(actual, alias, process.platform === 'win32' ? 'junction' : 'dir');
   const f = await fixture(t, { directory: path.join(alias, 'updates') });
   assert.equal((await f.download.download(f.release)).state, 'ready');
   assert.equal((await f.download.download(f.release)).state, 'ready');

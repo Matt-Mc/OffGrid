@@ -1,0 +1,41 @@
+name: Test desktop platforms
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      - if: runner.os == 'Windows'
+        run: npm run verify:win
+      - if: runner.os == 'Windows'
+        run: npm run dist:win
+      - if: runner.os == 'Windows'
+        name: Verify packaged server UI and credential storage
+        run: |
+          $env:OFFGRID_SMOKE_APP = Join-Path $PWD 'release/win-unpacked/Offgrid.exe'
+          node scripts/smoke-plex-ui.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/smoke-jellyfin-ui.cjs
+      - if: runner.os == 'Windows'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: offgrid-windows-test-installer
+          path: release/Offgrid-*-win-x64.exe
+          if-no-files-found: error

@@ -13,6 +13,8 @@ const { PlexConnection } = require('./plex-connection.cjs');
 const { JellyfinConnection } = require('./jellyfin-connection.cjs');
 const { normalizeServerUrl: normalizeJellyfinUrl } = require('./jellyfin-client.cjs');
 const { createMpvPlayer } = require('./mpv-player.cjs');
+const { createManagedMpv } = require('./managed-mpv.cjs');
+let managedMpv;
 const { requestLocalNetworkAccess } = require('./local-network.cjs');
 const { createAppUpdates } = require('./app-updates.cjs');
 const { createUpdateDownload } = require('./update-download.cjs');
@@ -116,7 +118,7 @@ async function awaitWhileActive(active, start) {
 }
 function trackedSpawn(id, command, args) {
   assertActive(id);
-  const child = spawn(command, args, { detached: process.platform !== "win32" });
+  const child = spawn(command, args, { detached: process.platform !== "win32", windowsHide: true });
   const active = queue?.active?.id === id ? queue.active : null;
   active?.children.add(child);
   child.on("close", () => active?.children.delete(child));
@@ -374,7 +376,7 @@ function releaseAssetName() {
 
 function commandVersion(command) {
 	return new Promise((resolve) => {
-		const child = spawn(command, ["--version"]);
+		const child = spawn(command, ["--version"], { windowsHide: true });
 		let output = "";
 		child.stdout.on("data", (chunk) => {
 			output += chunk.toString();
@@ -731,7 +733,7 @@ function runMetadata(url, quality, ytdlpCommand = null, { includeComments = fals
   if(quality) args.push('--format',formatForQuality(quality));
   if(includeComments) args.push('--write-comments');
   args.push('--',url);
-  return runYtdlpJson(command,args,{signal,spawnProcess:jobId ? (cmd,argv)=>trackedSpawn(jobId,cmd,argv) : spawn});
+  return runYtdlpJson(command,args,{signal,spawnProcess:jobId ? (cmd,argv)=>trackedSpawn(jobId,cmd,argv) : (cmd,argv)=>spawn(cmd,argv,{windowsHide:true})});
 }
 
 function extractTopComments(metadata) {
@@ -761,7 +763,7 @@ function runChannelFeed(channelUrl, ytdlpCommand, count = settings.recentVideoCo
 			"--no-warnings",
 			"--ignore-errors",
 			feedUrl,
-		]);
+		], { windowsHide: true });
 		let stdout = "";
 		let stderr = "";
 		child.stdout.on("data", (chunk) => {
@@ -1432,7 +1434,10 @@ if(primaryInstance) app.whenReady().then(() => {
     open:async()=>{throw new Error('Native playback is disabled in isolated UI tests.');},
     stop:async()=>{}, control:async()=>{},
   } : createMpvPlayer({
-    bundledPath: app.isPackaged && process.resourcesPath ? path.join(process.resourcesPath,'mpv','bin','mpv') : undefined,
+    bundledPath: app.isPackaged && process.platform === 'darwin' && process.resourcesPath ? path.join(process.resourcesPath,'mpv','bin','mpv') : undefined,
+    ...(process.platform === 'win32' && process.arch === 'x64' ? {
+      managedStatus: (managedMpv = createManagedMpv({directory:toolsDirectory,onChange:status=>broadcast('player:availability',status)})).status,
+    } : {}),
     onProgress:(id,progress)=>{if(library.some(video=>video.id===id)) savePlayback(id,progress);},
     onState:state=>broadcast('player:update',state),
   });
@@ -1511,7 +1516,7 @@ if(primaryInstance) app.whenReady().then(() => {
     await shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork');
     return {opened:true};
   });
-  handle('player:status',()=>player.status());
+  handle('player:status',()=>{void managedMpv?.ensure(); return player.status();});
   handle('player:state',()=>player.state());
   handle('player:open',(_event,id)=>{
     const video=library.find(item=>item.id===id);
@@ -1659,7 +1664,7 @@ if(primaryInstance) app.whenReady().then(() => {
     sendToolUpdate({status:"ready",version:"test",message:"Download components available in test mode"});
     sendFfmpegUpdate({status:"ready",version:"test",message:"FFmpeg available in test mode"});
   } else {
-    updateManagedYtdlp().catch(()=>{}); updateManagedFfmpeg().catch(()=>{});
+    updateManagedYtdlp().catch(()=>{}); updateManagedFfmpeg().catch(()=>{}); managedMpv?.ensure();
     setInterval(()=>updateManagedFfmpeg().catch(()=>{}),UPDATE_INTERVAL_MS);
     syncSubscriptions(null,{scheduled:true}).catch(()=>{});
     setInterval(()=>syncSubscriptions(null,{scheduled:true}).catch(()=>{}),60_000);
@@ -1684,7 +1689,7 @@ app.on('before-quit',event=>{
   exitPending=true;
   downloadServices?.dispose();appUpdates?.dispose();localAccessController?.abort();
   const deadline=setTimeout(()=>{exitReady=true;app.exit(0);},8000);deadline.unref?.();
-  Promise.allSettled([queue?.shutdown(),player?.stop(),updateDownload?.dispose()]).finally(()=>{
+  Promise.allSettled([queue?.shutdown(),player?.stop(),updateDownload?.dispose(),managedMpv?.dispose()]).finally(()=>{
     clearTimeout(deadline);exitReady=true;app.exit(0);
   });
 });

@@ -10,7 +10,7 @@ test('Mach-O dependency parsing preserves spaces, weak references, and versioned
   assert.deepEqual(parseRpaths('          cmd LC_RPATH\n      cmdsize 48\n         path @loader_path/../Some Libraries (offset 12)\nLoad command 2\n cmd LC_RPATH\n cmdsize 32\n path /usr/lib/swift (offset 12)'), ['@loader_path/../Some Libraries', '/usr/lib/swift']);
 });
 
-test('dependency resolution handles loader/executable paths, inherited rpaths and symlinks', () => {
+test('dependency resolution handles loader/executable paths, inherited rpaths and symlinks', { skip: process.platform === 'win32' && 'Mac bundler uses POSIX paths' }, () => {
   const entries = new Map([
     ['/brew/lib/liba.dylib', '/brew/Cellar/a/1/lib/liba.1.dylib'],
     ['/brew/bin/libb.dylib', '/brew/Cellar/b/2/lib/libb.dylib'],
@@ -33,7 +33,7 @@ test('system dependency allowlist has directory boundaries and rewrites remain r
   assert.equal(relativeLoadPath('/bundle/lib/b.dylib', '/bundle/lib/a.dylib'), '@loader_path/a.dylib');
 });
 
-test('formula provenance follows symlinks to the installed recipe and fails closed for unowned binaries', () => {
+test('formula provenance follows symlinks to the installed recipe and fails closed for unowned binaries', { skip: process.platform === 'win32' && 'Homebrew bundle provenance is macOS-specific' }, () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'offgrid-bundle-provenance-'));
   try {
     const keg = path.join(root, 'Cellar/mpv/0.41.0_9');

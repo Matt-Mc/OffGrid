@@ -1,6 +1,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { killProcessTree } = require('./process-tree.cjs');
 const QUALITIES = ['480p', '720p', '1080p', 'best'];
 const DISK_RESERVE_BYTES = 2_000_000_000;
 const TERMINAL = new Set(['complete', 'error', 'canceled']);
@@ -236,12 +237,10 @@ class DurableQueue {
     active.stop=(status,message)=>{
       if(active.stopReason) return;
       active.stopReason={status,message};active.controller.abort();signalStop(active.stopReason);
-      for(const child of active.children) {
-        try {if(process.platform!=='win32' && child.pid) process.kill(-child.pid,'SIGKILL');else child.kill('SIGKILL');}
-        catch {try {child.kill('SIGKILL');} catch {}}
-      }
+      active.termination=Promise.all([...active.children].map(child=>killProcessTree(child)))
+        .then(()=>null,error=>{active.terminationError=error;return error;});
     };
-    active.drain=async()=>{await Promise.all([...childClosures.values(),...writers]);};
+    active.drain=async()=>{await Promise.all([...childClosures.values(),...writers]);await active.termination;};
     return active;
   }
   async pump() {
@@ -267,12 +266,14 @@ class DurableQueue {
           await active.drain();
           let patch={retainedBytes:0,resumable:false};
           try {
+            if(active.terminationError) throw active.terminationError;
             if(outcome.status==='canceled') this.cleanup(job);
             else if(this.retain) patch={...patch,...await this.retain(job,outcome)};
             else this.cleanup(job);
           } catch(retentionError) {
             Object.assign(outcome,{status:'paused',message:`Recovery needs attention: ${retentionError.message}`});
             patch.recoveryBlocked=true;
+            if(active.terminationError) this.paused=true;
           }
           if(patch.status==='complete') {
             this.update(job.id,{...patch,retryCount:0,nextRetryAt:null},{allowStoppedCompletion:true});

@@ -36,8 +36,7 @@ h3 { font-size: 13px; font-weight: 600; }
 .brand-mark { width: 31px; height: 31px; border-radius: 8px; background: var(--accent); color: #f6f8f2; display: grid; place-items: center; }
 .brand-glyph { position: relative; width: 17px; height: 17px; border: 2px solid currentColor; border-radius: 50%; }
 .brand-glyph::after { content: ''; position: absolute; width: 22px; height: 2px; background: currentColor; left: 50%; top: 50%; transform: translate(-50%, -50%) rotate(-35deg); }
-.sidebar-label { font-size: 9px; font-weight: 650; letter-spacing: 1.3px; color: #7c8978; margin: 42px 13px 12px; }
-.primary-nav { display: grid; gap: 5px; }
+.primary-nav { display: grid; gap: 5px; margin-top: 32px; }
 .nav-item { display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px 12px; border: 0; border-radius: 7px; text-align: left; font-size: 13px; background: transparent; color: #667360; }
 .nav-item:hover { background: #e4e9df; }
 .nav-item.active { background: #dce6d7; color: #35523b; font-weight: 600; }
@@ -55,9 +54,8 @@ h3 { font-size: 13px; font-weight: 600; }
 .main-content { flex: 1; min-width: 0; overflow: auto; position: relative; }
 .screen { height: 100%; overflow: auto; padding: 0 clamp(24px, 4vw, 54px) 54px; }
 .page-header { min-height: 153px; display: flex; align-items: center; justify-content: space-between; gap: 22px; }
-.eyebrow { color: #82907c !important; font-size: 9px !important; letter-spacing: 1.45px; font-weight: 650; margin: 0 0 8px !important; }
 .page-header h1 { font-size: clamp(29px, 3.4vw, 36px); font-weight: 650; letter-spacing: -1.4px; line-height: 1.12; }
-.page-header p:not(.eyebrow) { color: var(--muted); font-size: 12px; margin-top: 9px; line-height: 1.5; }
+.page-header p { color: var(--muted); font-size: 12px; margin-top: 9px; line-height: 1.5; }
 .primary-button, .secondary-button, .danger-button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; border-radius: 6px; padding: 0 14px; min-height: 36px; border: 1px solid transparent; font-size: 12px; font-weight: 550; white-space: nowrap; }
 .primary-button { color: #fcfdf8; background: var(--accent); border-color: #426148; }
 .primary-button:hover:not(:disabled) { background: var(--accent-hover); }
@@ -282,7 +280,7 @@ h3 { font-size: 13px; font-weight: 600; }
   .screen { padding-inline: 21px; }
   .page-header { min-height: 145px; gap: 15px; }
   .page-header h1 { font-size: 29px; }
-  .page-header p:not(.eyebrow) { font-size: 11px; }
+  .page-header p { font-size: 11px; }
   .page-header .primary-button, .page-header .secondary-button { font-size: 11px; padding-inline: 10px; }
   .download-form { flex-wrap: wrap; }
   .download-form .grow { flex-basis: 100%; }
