@@ -23,7 +23,12 @@ function matching(file, expected, optional = false) {
   if (stat && (stat.dev !== expected.dev || stat.ino !== expected.ino || stat.size !== expected.size)) fail('Subtitle recovery file changed. Its files were preserved.');
   return stat;
 }
-function syncDirectory(value) { const fd = fs.openSync(value, 'r'); try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); } }
+function syncDirectory(value) {
+  // Windows does not support flushing directory handles through Node's fsync.
+  // Journal contents and staged files are still flushed before publishing them.
+  if (process.platform === 'win32') return;
+  const fd = fs.openSync(value, 'r'); try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+}
 function createAssetRecovery({ workDirectory, assetsDirectory, getLibrary, saveLibrary }) {
   const root = path.resolve(workDirectory), destination = path.resolve(assetsDirectory);
   function locations(job) {
@@ -145,7 +150,8 @@ function createAssetRecovery({ workDirectory, assetsDirectory, getLibrary, saveL
       if (regular(record.filePath,true)) fail('A subtitle already exists at the destination.');
       const stat = regular(source);
       if (stat.size !== record.sizeBytes) fail('A staged subtitle changed before saving.');
-      const fd=fs.openSync(source,'r'); try{fs.fsyncSync(fd);}finally{fs.closeSync(fd);}
+      // Windows requires a writable handle for FlushFileBuffers/fsync.
+      const fd=fs.openSync(source,process.platform === 'win32' ? 'r+' : 'r'); try{fs.fsyncSync(fd);}finally{fs.closeSync(fd);}
       return { asset: record, source, identity: identity(stat) };
     });
     const prior = replaced.map(asset => {
