@@ -1,6 +1,6 @@
 {
   "name": "offgrid",
-  "version": "0.3.1",
+  "version": "0.3.6",
   "description": "A quiet, local library for watching authorized videos offline.",
   "author": "Offgrid",
   "main": "electron/main.cjs",
@@ -37,7 +37,14 @@
   "build": {
     "appId": "com.offgrid.videolibrary",
     "productName": "Offgrid",
-    "protocols": [{"name":"Send to Offgrid","schemes":["offgrid"]}],
+    "protocols": [
+      {
+        "name": "Send to Offgrid",
+        "schemes": [
+          "offgrid"
+        ]
+      }
+    ],
     "files": [
       "dist/**/*",
       "electron/**/*",
@@ -70,7 +77,14 @@
       ]
     },
     "win": {
-      "target": [{ "target": "nsis", "arch": ["x64"] }],
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
       "artifactName": "Offgrid-${version}-win-${arch}.${ext}",
       "icon": "build/icon.png"
     },
