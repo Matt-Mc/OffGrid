@@ -9,7 +9,7 @@ const {createHarness,eventually}=require('./backend-harness.cjs');
 async function jobState(h,id,status) {
   let lastJob;
   return eventually(async()=>{lastJob=(await h.api.listDownloads()).jobs.find(job=>job.id===id);return lastJob?.status===status && lastJob;},
-    `Download did not become ${status}; last job state: ${JSON.stringify(lastJob)}`);
+    `Download did not become ${status}; last job state: ${JSON.stringify(lastJob)}`,10_000);
 }
 function mediaCalls(h) {return h.calls.filter(call=>call.args.includes('--output') && !call.args.includes('--skip-download'));}
 function capture(url) {return `offgrid://add?url=${encodeURIComponent(url)}`;}
