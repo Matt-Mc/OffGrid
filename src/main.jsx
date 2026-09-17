@@ -53,6 +53,7 @@ function App() {
   const [composerRequest, setComposerRequest] = useState(0);
   const [followRequest, setFollowRequest] = useState(null);
   const [confirmation, setConfirmation] = useState(null);
+  const [captures,setCaptures] = useState({items:[]});
   const [confirmBusy, setConfirmBusy] = useState(false);
   const [confirmError, setConfirmError] = useState('');
   const loadGeneration = useRef(0);
@@ -74,6 +75,7 @@ function App() {
     let alive = true;
     const generation = ++loadGeneration.current;
     const initial = [[api.listVideos, setVideos], [api.getSettings, setSettings], [api.getStorage, setStorage], [api.listDownloads, setQueue], [api.listSubscriptions, setSubscriptions], [api.subscriptionSyncStatus, setSyncStatus], [api.toolStatus, setTool], [api.ffmpegStatus, setFfmpeg], [api.appVersion, setVersion]];
+    if (api.listCaptures) initial.push([api.listCaptures,value => {setCaptures(value);if(value.items?.length) setView('downloads');}]);
     if (api.playerStatus) initial.push([api.playerStatus, setPlayer]);
     if (api.playerState) initial.push([api.playerState, setPlayback]);
     if (api.appUpdateStatus) initial.push([api.appUpdateStatus,setAppUpdate]);
@@ -87,6 +89,7 @@ function App() {
       setLoaded(true);
     });
     const listeners = [api.onQueueUpdate(setQueue), api.onSettingsUpdate(setSettings), api.onStorageUpdate(setStorage), api.onLibraryUpdate(setVideos), api.onSubscriptionUpdate(setSubscriptions), api.onSubscriptionSyncUpdate(setSyncStatus), api.onToolUpdate(setTool), api.onFfmpegUpdate(setFfmpeg), api.onSettingsOpen(() => setView('settings'))];
+    if (api.onCapturesUpdate) listeners.push(api.onCapturesUpdate(value => {setCaptures(value);if(value.items?.length) setView('downloads');}));
     if (api.onPlayerUpdate) listeners.push(api.onPlayerUpdate(setPlayback));
     if (api.onAppUpdate) listeners.push(api.onAppUpdate(setAppUpdate));
     const updateOnline = () => {
@@ -198,7 +201,7 @@ function App() {
       type: 'videos',
       items,
       title: items.length === 1 ? `Delete “${items[0].title}”?` : `Delete ${items.length} videos?`,
-      description: `This permanently removes ${formatBytes(items.reduce((sum, video) => sum + (video.deletionBytes ?? video.sizeBytes ?? 0), 0))} of video and thumbnails, together with associated metadata. ${items.length === 1 ? 'This video' : 'These videos'} will stay excluded from automatic channel downloads.`,
+      description: `This permanently removes ${formatBytes(items.reduce((sum, video) => sum + (video.deletionBytes ?? video.sizeBytes ?? 0), 0))} of video, subtitles, and thumbnails, together with associated metadata. ${items.length === 1 ? 'This video' : 'These videos'} will stay excluded from automatic channel downloads.`,
       action: 'Delete permanently'
     });
   }
@@ -317,15 +320,15 @@ function App() {
       {!loaded && api && <p className="loading-message" role="status">Opening your library…</p>}
       {loaded && <>
         <section className="screen" hidden={view !== 'library'} aria-label="Library">
-          <Library videos={videos} onAdd={addVideo} onPlay={openVideo} onDelete={requestDelete} onWatched={markWatched} />
+          <Library videos={videos} onAdd={addVideo} onPlay={openVideo} onDelete={requestDelete} onWatched={markWatched} onRetrySubtitles={async video => {await api.retrySubtitles(video.id);setVideos(await api.listVideos());}} />
         </section>
         <section className="screen" hidden={view !== 'downloads'} aria-label="Downloads">
-          <Downloads settings={settings} queue={queue} online={online} onManage={manageStorage} onPlay={openVideo} videos={videos} refreshQueue={refreshQueue} composerRequest={composerRequest} />
+          <Downloads settings={settings} queue={queue} storage={storage} online={online} onManage={manageStorage} onPlay={openVideo} videos={videos} refreshQueue={refreshQueue} composerRequest={composerRequest} captures={captures} onAcknowledgeCapture={async id => {await api.acknowledgeCapture(id);setCaptures(await api.listCaptures());}} />
         </section>
         <section className="screen" hidden={view !== 'following'} aria-label="Following">
           <Following subscriptions={subscriptions} settings={settings} online={online} syncStatus={syncStatus} refresh={refreshSubscriptions} onUnfollow={requestUnfollow} followRequest={followRequest} />
         </section>
-        {view === 'servers' && <Servers provider={serverProvider} onProviderChange={setServerProvider} onDownloads={() => setView('downloads')} />}
+        {view === 'servers' && <Servers settings={settings} provider={serverProvider} onProviderChange={setServerProvider} onDownloads={() => setView('downloads')} />}
         <section className="screen" hidden={view !== 'settings'} aria-label="Settings">
           <Settings settings={settings} storage={storage} videos={videos} queue={queue} onSave={saveSettings} onDelete={requestDelete} storageRequest={storageRequest} tool={tool} ffmpeg={ffmpeg} version={version} onUpdateTool={updateTool} player={player} onRefreshPlayer={refreshPlayer}
             appUpdate={appUpdate} onCheckAppUpdate={()=>appUpdateAction('checkAppUpdate')} onDownloadAppUpdate={()=>appUpdateAction('downloadAppUpdate')} onCancelAppUpdate={()=>appUpdateAction('cancelAppUpdate')}/>

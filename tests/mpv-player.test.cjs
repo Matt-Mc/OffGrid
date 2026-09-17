@@ -1,6 +1,10 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const crypto = require('node:crypto');
 const { createMpvPlayer } = require('../electron/mpv-player.cjs');
 
 function harness(t, options = {}) {
@@ -9,6 +13,7 @@ function harness(t, options = {}) {
     async access(file) { if (file !== '/opt/homebrew/bin/mpv') throw new Error('Missing'); },
     async stat(file) { if (file.includes('missing')) throw new Error('Missing'); return { isFile: () => true }; },
     async realpath(file) { return file; },
+    async lstat(file) { return options.lstat ? options.lstat(file) : fs.promises.lstat(file); },
   } };
   const player = createMpvPlayer({ platform: 'darwin', fs: fileSystem, env: { PATH: '.:relative:/bin' },
     startupTimeoutMs: 100, shutdownTimeoutMs: 5,
@@ -54,6 +59,60 @@ test('discovers mpv without a shell and launches only the supplied local file th
   await assert.rejects(player.open(media('remote', { filePath: 'https://example.com/movie.mkv' })), /downloaded library/);
   await assert.rejects(player.open(media('missing')), /missing or unreadable/);
   assert.equal(processes.length, 1);
+});
+
+test('mpv receives only owner-named bounded local VTT sidecars and disables automatic discovery', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'offgrid-mpv-subtitles-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const videoId = 'captioned-video';
+  const assetId = crypto.randomUUID(), linkedId = crypto.randomUUID(), oversizedId = crypto.randomUUID();
+  const validPath = path.join(directory, `${videoId}.${assetId}.vtt`);
+  const linkPath = path.join(directory, `${videoId}.${linkedId}.vtt`);
+  const largePath = path.join(directory, `${videoId}.${oversizedId}.vtt`);
+  const targetPath = path.join(directory, 'outside.vtt');
+  fs.writeFileSync(validPath, 'WEBVTT\n\n00:00.000 --> 00:01.000\nHello\n');
+  fs.writeFileSync(targetPath, 'WEBVTT\n');
+  fs.symlinkSync(targetPath, linkPath);
+  fs.closeSync(fs.openSync(largePath, 'w'));
+  fs.truncateSync(largePath, 5 * 1024 * 1024 + 1);
+  const { player, launches } = harness(t);
+  await player.open(media(videoId, { assets: [
+    { id: assetId, kind: 'subtitle', format: 'vtt', filePath: validPath },
+    { id: linkedId, kind: 'subtitle', format: 'vtt', filePath: linkPath },
+    { id: oversizedId, kind: 'subtitle', format: 'vtt', filePath: largePath },
+    { id: crypto.randomUUID(), kind: 'subtitle', format: 'srt', filePath: validPath },
+    { id: crypto.randomUUID(), kind: 'thumbnail', format: 'vtt', filePath: validPath },
+    { id: crypto.randomUUID(), kind: 'subtitle', format: 'vtt', filePath: targetPath }
+  ] }));
+  const args = launches[0].args;
+  assert.ok(args.includes('--sub-auto=no'));
+  assert.ok(args.includes(`--sub-file=${validPath}`));
+  assert.equal(args.filter(arg => arg.startsWith('--sub-file=')).length, 1);
+});
+
+test('stop safely cancels a pending subtitle stat before an mpv session is created', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'offgrid-mpv-pending-subtitle-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const videoId = 'pending-subtitle-video';
+  const assetId = crypto.randomUUID();
+  const subtitlePath = path.join(directory, `${videoId}.${assetId}.vtt`);
+  fs.writeFileSync(subtitlePath, 'WEBVTT\n');
+  let entered, release;
+  const waiting = new Promise(resolve => { release = resolve; });
+  const started = new Promise(resolve => { entered = resolve; });
+  const { player, launches } = harness(t, { lstat(file) {
+    if (file === subtitlePath) { entered(); return waiting; }
+    return fs.promises.lstat(file);
+  } });
+  const opening = player.open(media(videoId, { assets: [
+    { id: assetId, kind: 'subtitle', format: 'vtt', filePath: subtitlePath },
+  ] }));
+  await started;
+  await player.stop();
+  release(await fs.promises.lstat(subtitlePath));
+  await assert.rejects(opening, /canceled/);
+  assert.equal(launches.length, 0);
+  assert.equal(player.state().status, 'idle');
 });
 
 test('reports installation guidance and unsupported platforms without spawning', async t => {

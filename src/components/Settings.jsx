@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ErrorMessage, Icon, QualitySelect, StorageBar, Toggle, formatBytes } from './shared';
+import { ErrorMessage, Icon, QualitySelect, StorageBar, SubtitleOptions, Toggle, formatBytes } from './shared';
 import { UpdateAction, updateDescription } from './AppUpdates';
 function SettingRow({
   title,
@@ -46,6 +46,7 @@ export function Settings({
   const [managerOpen, setManagerOpen] = useState(false);
   const [selected, setSelected] = useState([]);
   const [sort, setSort] = useState('size');
+  const [discardId,setDiscardId] = useState(null);
   const storageSection = useRef(null);
   useEffect(() => {
     const next = settings.maxLibraryBytes ? String(settings.maxLibraryBytes / 1e9) : 'none';
@@ -129,6 +130,14 @@ export function Settings({
           <ErrorMessage>
             {errors.defaultQuality}
           </ErrorMessage>
+          <SettingRow title="Default subtitles" description="Save available text subtitles in this language for future downloads.">
+            <SubtitleOptions language={settings.defaultSubtitleLanguage || ''} onLanguage={value => save('defaultSubtitleLanguage',value)} disabled={!!saving}/>
+          </SettingRow>
+          <ErrorMessage>{errors.defaultSubtitleLanguage}</ErrorMessage>
+          <SettingRow title="Allow automatic captions" description="Use automatic YouTube captions when a matching creator subtitle is unavailable.">
+            <Toggle checked={!!settings.allowAutoCaptions} onChange={value => save('allowAutoCaptions',value)} disabled={!!saving} label="Allow automatic captions"/>
+          </SettingRow>
+          <ErrorMessage>{errors.allowAutoCaptions}</ErrorMessage>
           <SettingRow title="Save available comments" description="Keep a selection of comments to read offline alongside each video.">
             <Toggle checked={settings.saveComments} onChange={value => save('saveComments', value)} disabled={!!saving} label="Save available comments" />
           </SettingRow>
@@ -176,7 +185,7 @@ export function Settings({
           </div>
         </div>
         <div className="setting-group">
-          <SettingRow title="Maximum library size" description="Includes saved videos, thumbnails, and temporary download files. Nothing is deleted automatically.">
+          <SettingRow title="Maximum library size" description="Includes saved videos, subtitles, thumbnails, and temporary download files. Nothing is deleted automatically.">
             <select value={limit} onChange={e => setLimit(e.target.value)} aria-label="Maximum library size">
               <option value="none">No limit</option>
               {[10, 20, 50, 100].map(size => <option key={size} value={size}>{size} GB</option>)}
@@ -206,6 +215,11 @@ export function Settings({
           </ErrorMessage>
         </div>
         <p className="section-note">Sizes use decimal GB. App support files: {formatBytes(storage?.supportBytes)} (outside your library limit). Offgrid keeps at least {formatBytes(storage?.diskReserveBytes || 2e9)} of disk space free.</p>
+        {queue.jobs.some(job => job.retainedBytes > 0 && !['complete','canceled'].includes(job.status)) && <details className="incomplete-downloads"><summary>Incomplete downloads · {formatBytes(queue.jobs.filter(job => !['complete','canceled'].includes(job.status)).reduce((sum,job) => sum + (job.retainedBytes || 0),0))} kept</summary>
+          <p className="section-note">Kept files count toward your library limit. Resume in Downloads, or discard the saved progress below.</p>
+          {queue.jobs.filter(job => job.retainedBytes > 0 && !['complete','canceled'].includes(job.status)).map(job => <div className="incomplete-row" key={job.id}><div><strong>{job.title || 'Incomplete download'}</strong><p>{formatBytes(job.retainedBytes)} · {job.status === 'paused' ? 'Paused' : job.status}</p>{discardId === job.id && <p>Discard this download and its saved progress?</p>}</div>{discardId === job.id ? <><button className="text-button danger" disabled={!!saving} onClick={() => runAction('discard',async() => {await window.offgrid.cancelDownload(job.id);setDiscardId(null);})}>Discard download</button><button className="text-button" disabled={!!saving} onClick={() => setDiscardId(null)}>Keep progress</button></> : <button className="text-button" disabled={!!saving} onClick={() => setDiscardId(job.id)}>Discard…</button>}</div>)}
+          <ErrorMessage>{errors.discard}</ErrorMessage>
+        </details>}
         {managerOpen && <div className="storage-manager">
           <div className="section-heading">
             <h3>Saved videos</h3>
@@ -233,7 +247,7 @@ export function Settings({
                 </b>
               </label>)}
             </div>
-            <p className="section-note">Sizes include the saved video and its thumbnail. Associated metadata is also removed.</p>
+            <p className="section-note">Sizes include the saved video, subtitles, and its thumbnail. Associated metadata is also removed.</p>
           </> : <p className="section-note">There are no saved videos to manage yet.</p>}
         </div>}
       </section>

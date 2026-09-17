@@ -11,6 +11,7 @@ const userId = 'cccccccccccccccccccccccccccccccc';
 const movieId = '00000000000000000000000000000042';
 const secondMovieId = '00000000000000000000000000000043';
 const libraryId = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+const sourceIdFor = id => `dddddddddddddddddddddddd${id.slice(-8)}`;
 
 async function jellyfinFixture(t) {
   const state = {serverId:'fixture-jellyfin-server',size:128,hold:false,requests:[],streams:0};
@@ -37,7 +38,7 @@ async function jellyfinFixture(t) {
       return res.end(Buffer.alloc(state.size,42));
     }
     const item=id=>({Id:id,Name:`Jellyfin film ${id}`,Type:'Movie',MediaType:'Video',RunTimeTicks:1_200_000_000,CanDownload:true,Path:'/media/private-file.mkv',
-      MediaSources:[{Id:`source-${id}`,Type:'Default',Protocol:'File',Container:'mkv',Size:state.size,SupportsDirectPlay:true,SupportsDirectStream:true,Path:'/media/private-file.mkv'}]});
+      MediaSources:[{Id:sourceIdFor(id),Type:'Default',Protocol:'File',Container:'mkv',Size:state.size,SupportsDirectPlay:true,SupportsDirectStream:true,Path:'/media/private-file.mkv'}]});
     const metadataMatch=url.pathname.match(new RegExp(`^/Users/${userId}/Items/([a-f0-9]+)$`));
     if(metadataMatch) return json(item(metadataMatch[1]));
     if(url.pathname===`/Users/${userId}/Items` || url.pathname==='/Items') return json({Items:[item(movieId)],TotalRecordCount:1,StartIndex:0});

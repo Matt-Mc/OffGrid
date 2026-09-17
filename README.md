@@ -16,9 +16,13 @@ Built with Electron and React. Early-stage, personal software: feedback and smal
 
 ## What you can do
 
-- **Save YouTube videos.** Preview a link, choose a quality from 480p to Best available, and optionally keep comments.
-- **Bring your home library.** Browse and search Plex or Jellyfin movies, seasons, and episodes. Download individual titles as original files.
-- **Prepare a download queue.** See progress, cancel or retry jobs, and stop the queue after the current download. Queue state survives restarts.
+These features describe the current source checkout; published installers may lag behind.
+
+- **Save YouTube videos in batches.** Preview a video, paste multiple links, or select entries from a playlist. Choose 480p through Best available and optionally keep comments.
+- **Bring your home library.** Browse Plex or Jellyfin, select several titles, or review a whole season. Keep originals or make smaller copies up to 720p on this Mac.
+- **Pause and recover downloads.** Pause individual jobs, resume usable partial files after reopening, or stop the queue after the current download. Temporary connection failures get a limited number of retries.
+- **Send links from your browser.** The optional [Chrome/Edge extension](extensions/chromium/README.md) sends a link to Downloads for review.
+- **Keep subtitles offline.** Save available text subtitles, optionally include automatic YouTube captions, and retry missing subtitles without downloading the video again.
 - **Follow YouTube channels.** Check for new videos and opt into automatic downloads while Offgrid is open and online.
 - **Watch and resume.** Search your saved library, filter watched videos, and continue from your last position. Compatible YouTube downloads have a built-in player; mpv handles broader format support.
 - **Keep storage predictable.** Set a library limit and manage saved videos. Offgrid holds new work when space runs out instead of automatically deleting your collection.
@@ -100,7 +104,9 @@ Your account needs library access and [permission to download](https://jellyfin.
 
 Use **Request local access** on macOS, or **Check server connection** elsewhere, to test the entered address before signing in. On macOS this can trigger the first local-network permission prompt. Choose **Allow**. If access was previously denied, use **Open Local Network settings**, enable Offgrid, and check again.
 
-Downloads preserve the original file and embedded audio/subtitle tracks. They play in a separate mpv window; Offgrid provides pause/resume and stop controls and saves playback progress. Use mpv's own controls for audio tracks, subtitles, seeking, and fullscreen.
+Original downloads preserve embedded audio/subtitle tracks. The smaller-copy option downloads the full original first, then converts locally, requiring extra time and temporary storage; it does not reduce network transfer. HDR, image subtitles, and files with more than two embedded subtitle tracks currently require keeping the original. Supported embedded text subtitles are saved as separate VTT files.
+
+Server videos play in a separate mpv window; Offgrid provides pause/resume and stop controls and saves playback progress. Use mpv's own controls for audio tracks, subtitles, seeking, and fullscreen.
 
 Disconnecting a server cancels its unfinished downloads and removes its saved credentials. It keeps already-downloaded videos.
 
@@ -112,17 +118,17 @@ Server tokens are encrypted through the operating system using Electron's [safeS
 
 Offgrid contacts the services needed for your requested downloads and channel checks, and GitHub for app-release checks and managed yt-dlp/FFmpeg updates. App-release checks send no library information, server credentials, or GitHub token. Installer downloads begin only when you choose to update. New installations keep automatic channel downloads and saved comments off until you enable them. Existing installations retain their prior preferences. There is no Offgrid account or cloud library sync.
 
-The optional **Maximum library size** counts saved media, thumbnails, and temporary download files. Offgrid also preserves a **2 GB free-disk reserve**. Processing can need more space than the final video, so downloads may wait even when the finished file would fit. Lowering the limit never automatically deletes existing videos.
+The optional **Maximum library size** counts saved media, subtitles, thumbnails, and retained temporary files. Offgrid also preserves a **2 GB free-disk reserve**. Processing can need more space than the final video, so downloads may wait even when the finished file would fit. Lowering the limit never automatically deletes existing videos.
 
 Before a trip, finish downloads and try playback with your network disconnected. A queued or partially downloaded item is not ready for offline viewing.
 
 ## Known limitations
 
-- Server downloads are original quality only: no transcoding or full-season batch downloads.
+- Smaller server copies use local conversion; server-side download optimization is not enabled. A copy is accepted only after validation and only when smaller than its original.
 - Plex uses the first media version. Jellyfin requires one unambiguous local original file with a known size. Multipart titles and ambiguous Jellyfin versions are not supported.
-- Server artwork and external subtitle files are not downloaded. Embedded tracks stay in the original file.
+- Server artwork is not downloaded. External VTT/SRT subtitle support depends on the server exposing a permitted downloadable text track. Subtitle styling may simplify when converted to VTT.
 - Watched status and playback position stay in Offgrid; they do not sync back to Plex or Jellyfin.
-- Interrupted downloads restart from the beginning when retried; byte-range resume is not implemented.
+- Server byte-range resume requires a strong ETag and a valid range response; otherwise the transfer restarts safely. YouTube continuation depends on yt-dlp and the source.
 - Channel checks run only while the app is open. There is no background service or remote server discovery. App updates open a verified installer; installation is completed manually.
 - YouTube availability can change. Private, restricted, or DRM-protected content is not a supported workflow.
 
@@ -134,9 +140,9 @@ Before a trip, finish downloads and try playback with your network disconnected.
 | The local-access check fails | The server may be offline, the address may be wrong, or network access may be blocked. The check reports reachability; it cannot conclusively identify permission denial. |
 | Server credentials cannot be saved | Unlock the system keychain/credential store. On Linux, a usable desktop secret store is required; Offgrid does not fall back to plaintext tokens. |
 | Plex or Jellyfin will not play | Packaged Mac builds include mpv; reinstall the app if its bundled player is missing or damaged. Development runs need system mpv. Windows mpv support has not been implemented yet. |
-| A download is waiting for storage | Free disk space, remove saved videos, or increase the library limit. For YouTube, retry at a lower quality. Server downloads retain original quality. |
+| A download is waiting for storage | Free disk space, remove saved videos, or increase the library limit. For YouTube, retry at a lower quality. Server conversion needs space for the original and the new copy. |
 | YouTube downloads fail | Check connectivity and the yt-dlp/FFmpeg status in Settings. Update the managed tools and retry; some content is unsupported. |
-| Download stopped when the app closed | Reopen **Downloads** and retry the interrupted item. Partial files are cleaned up; completed files remain available. |
+| Download stopped when the app closed | Reopen **Downloads** and resume the paused item. Reusable partial files are retained; **Cancel download** discards them. |
 
 When reporting a bug, include the app version, OS and CPU architecture, provider, reproduction steps, and the error text. Remove tokens, passwords, private server addresses, and personal media details from logs or screenshots.
 

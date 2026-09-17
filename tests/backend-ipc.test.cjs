@@ -60,7 +60,7 @@ test('download IPC honors recorded quality and comments, persists a local video 
   assert.equal(harness.networkRequests,0);
 });
 
-test('failed and canceled downloads clean partials without disturbing other jobs, and retry uses the same job', async (t) => {
+test('failed downloads can restart and canceled downloads discard partials without disturbing other jobs', async (t) => {
   const harness=await harnessFor(t,{fixtures:{failed:{error:true},held:{hold:true}}});
   await harness.api.setQueuePaused(true);
   const failed=await harness.api.startDownload('https://youtu.be/failed');
@@ -109,6 +109,10 @@ test('an underestimated completed download cannot be published over budget', asy
   await waitForJob(harness,accepted.id,'waiting-storage');
   assert.equal(downloadCalls(harness).length,1);
   assert.equal((await harness.api.listVideos()).length,0);
+  assert.ok((await harness.api.getStorage()).temporaryBytes>=18_000_000);
+  const retained=(await harness.api.listDownloads()).jobs.find(job=>job.id===accepted.id);
+  assert.ok(retained.retainedBytes>=18_000_000);
+  await harness.api.cancelDownload(accepted.id);
   assert.equal((await harness.api.getStorage()).temporaryBytes,0);
 });
 
@@ -149,13 +153,15 @@ test('deletion removes video and thumbnail, blocks automatic rediscovery, and al
   assert.equal((await harness.api.listVideos()).length,1);
 });
 
-test('live storage monitoring stops an underestimated active download and cleans its files', async (t) => {
+test('live storage monitoring stops an underestimated active download and counts retained files until discarded', async (t) => {
   const harness=await harnessFor(t,{fixtures:{growing:{expectedBytes:128,actualBytes:18_000_000,hold:true}}});
   await harness.api.updateSettings({maxLibraryBytes:17_000_000});
   const accepted=await harness.api.startDownload('https://youtu.be/growing');
   await waitForJob(harness,accepted.id,'waiting-storage');
-  assert.equal((await harness.api.getStorage()).temporaryBytes,0);
+  assert.ok((await harness.api.getStorage()).temporaryBytes>=18_000_000);
   assert.equal((await harness.api.listVideos()).length,0);
+  await harness.api.cancelDownload(accepted.id);
+  assert.equal((await harness.api.getStorage()).temporaryBytes,0);
 });
 
 test('lowering the cap during a download safely stops affected work and keeps saved videos', async (t) => {
@@ -168,8 +174,10 @@ test('lowering the cap during a download safely stops affected work and keeps sa
   await harness.api.updateSettings({maxLibraryBytes:1});
   await waitForJob(harness,held.id,'waiting-storage');
   assert.ok(fs.existsSync(video.filePath));
-  assert.equal((await harness.api.getStorage()).temporaryBytes,0);
+  assert.ok((await harness.api.getStorage()).temporaryBytes>0);
   assert.equal((await harness.api.listVideos()).length,1);
+  await harness.api.cancelDownload(held.id);
+  assert.equal((await harness.api.getStorage()).temporaryBytes,0);
 });
 
 test('channel downloads use the configured default options and the same storage checks', async (t) => {
@@ -186,7 +194,7 @@ test('channel downloads use the configured default options and the same storage 
   assert.equal(downloadCalls(harness).length,0);
 });
 
-test('restart removes interrupted working files while preserving user-paused queued work', async (t) => {
+test('restart preserves interrupted legacy files for an explicit restart and keeps global stop', async (t) => {
   const interruptedId=crypto.randomUUID(),queuedId=crypto.randomUUID();
   const harness=await harnessFor(t,{seed:{
     'downloads.json':{paused:true,jobs:[{id:interruptedId,status:'processing',url:'https://youtu.be/interrupted'},{id:queuedId,status:'queued',url:'https://youtu.be/queued'}]},
@@ -195,9 +203,10 @@ test('restart removes interrupted working files while preserving user-paused que
   }});
   const snapshot=await harness.api.listDownloads();
   assert.equal(snapshot.paused,true);
-  assert.equal(snapshot.jobs[0].status,'error');
+  assert.equal(snapshot.jobs[0].status,'paused');
+  assert.equal(snapshot.jobs[0].resumable,false,'legacy bytes do not have validated recovery identity');
   assert.equal(snapshot.jobs[1].status,'queued');
-  assert.equal(fs.existsSync(path.join(harness.dataDir,'videos','.work',interruptedId)),false);
+  assert.equal(fs.existsSync(path.join(harness.dataDir,'videos','.work',interruptedId)),true);
   assert.equal(fs.readFileSync(path.join(harness.dataDir,'videos','unrelated-file.txt'),'utf8'),'keep');
   assert.equal(downloadCalls(harness).length,0);
 });

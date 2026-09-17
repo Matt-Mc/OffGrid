@@ -136,10 +136,123 @@ test('restart reconciles interrupted files, preserves completed records and paus
   const cleanup=[];
   const queue=new DurableQueue({file,execute:async()=>{},cleanup:job=>cleanup.push(job.id),notify(){}});
   assert.equal(queue.paused,true);
-  assert.equal(queue.jobs[0].status,'error');
+  assert.equal(queue.jobs[0].status,'paused');
   assert.match(queue.jobs[0].message,/Interrupted/);
   assert.equal(queue.jobs[1].status,'complete');
   assert.deepEqual(cleanup,[interrupted.id]);
+});
+
+test('queue preserves unsupported or corrupt state without cleanup, persistence or execution', async t=>{
+  for(const content of ['{broken',JSON.stringify({version:999,jobs:[],paused:false}),JSON.stringify({version:2,jobs:[{id:'bad',status:'queued'}],paused:false})]) {
+    const directory=temporaryDirectory(t),file=path.join(directory,'downloads.json');
+    fs.writeFileSync(file,content);
+    let executed=false,cleaned=false;
+    const queue=new DurableQueue({file,execute:async()=>{executed=true;},cleanup:()=>{cleaned=true;}});
+    assert.match(queue.snapshot().warning,/preserved/);
+    await queue.pump();await queue.shutdown();
+    assert.throws(()=>queue.add({url:'https://youtu.be/example'}),/preserved/);
+    assert.equal(fs.readFileSync(file,'utf8'),content);
+    assert.equal(cleaned,false);assert.equal(executed,false);
+  }
+});
+
+test('migration reconciles checkpoints before cleanup and preserves paused options and completed history',t=>{
+  const file=path.join(temporaryDirectory(t),'downloads.json');
+  const jobs=[{id:crypto.randomUUID(),status:'downloading',quality:'720p'},
+    {id:crypto.randomUUID(),status:'paused',quality:'480p'},
+    {id:crypto.randomUUID(),status:'complete',videoId:'saved',playbackPositionSeconds:73}];
+  fs.writeFileSync(file,JSON.stringify({jobs,paused:true}));
+  const seen=[];
+  const queue=new DurableQueue({file,execute:async()=>{},cleanup(){assert.fail('Migration must reconcile before discarding files');},
+    recover(job){seen.push(job.id);return {retainedBytes:100,resumable:true};}});
+  assert.deepEqual(seen,jobs.slice(0,2).map(job=>job.id));
+  assert.equal(queue.jobs[0].status,'paused');assert.equal(queue.jobs[0].retainedBytes,100);
+  assert.equal(queue.jobs[1].quality,'480p');assert.deepEqual(queue.jobs[2],jobs[2]);
+  assert.equal(JSON.parse(fs.readFileSync(file)).version,2);
+});
+
+test('batch admission persists once before execution and rolls back a failed commit', async t=>{
+  const directory=temporaryDirectory(t),file=path.join(directory,'downloads.json');
+  const queue=new DurableQueue({file,execute:async()=>{},cleanup(){}});queue.pause(true);
+  let writes=0;const original=queue._write.bind(queue);
+  queue._write=(...args)=>{writes++;original(...args);};
+  const data=[{url:'https://youtu.be/a',sourceId:'a'},{url:'https://youtu.be/b',sourceId:'b'},{url:'https://www.youtube.com/watch?v=a',sourceId:'a'}];
+  const result=queue.addMany(data);
+  assert.deepEqual(result.map(item=>item.outcome),['added','added','alreadyQueued']);
+  assert.equal(result[0].id,result[2].id);assert.equal(writes,1);
+  assert.deepEqual(queue.jobs.map(job=>job.sourceId),['a','b']);
+  queue._write=()=>{throw new Error('Disk write failed');};
+  assert.throws(()=>queue.addMany([{url:'https://youtu.be/c',sourceId:'c'}]),/Disk write failed/);
+  assert.equal(queue.jobs.length,2);assert.equal(JSON.parse(fs.readFileSync(file)).jobs.length,2);
+  assert.throws(()=>queue.addMany([{url:'https://youtu.be/c'},null]),/Invalid download entry/);
+  assert.equal(queue.jobs.length,2);
+});
+
+test('resume credits only reusable bytes already counted in current disk usage',()=>{
+  const storage={savedBytes:0,temporaryBytes:95_000_000,maxLibraryBytes:116_000_000,freeBytes:2_030_000_000};
+  assert.match(checkStorageAdmission(storage,100_000_000,1),/library limit/);
+  assert.equal(checkStorageAdmission(storage,100_000_000,1,95_000_000),null);
+  assert.match(checkStorageAdmission({...storage,maxLibraryBytes:110_000_000},100_000_000,1,95_000_000),/library limit/);
+  assert.match(checkStorageAdmission({...storage,freeBytes:2_010_000_000},100_000_000,1,95_000_000),/processing/);
+  assert.match(checkStorageAdmission(storage,100_000_000,1,-1),/workspace/);
+  assert.match(checkStorageAdmission(storage,100_000_000,1,95_000_000,32_000_000),/library limit/);
+});
+
+test('queue persistence failure stops execution and surfaces a recoverable warning', async t=>{
+  let executed=false;
+  const queue=new DurableQueue({file:path.join(temporaryDirectory(t),'downloads.json'),execute:async()=>{executed=true;},cleanup(){}});
+  queue.pause(true);queue.add({url:'https://youtu.be/a'});
+  queue._write=()=>{throw new Error('Disk is full');};queue.paused=false;
+  await queue.pump();
+  assert.equal(executed,false);assert.equal(queue.active,null);assert.equal(queue.running,false);
+  assert.match(queue.snapshot().warning,/Disk is full/);
+});
+
+test('pause waits for child close and tracked writers before retaining files; stale completion is ignored', async t=>{
+  const {EventEmitter}=require('node:events');
+  const child=new EventEmitter();let closeChild,closeWriter,retained=false;
+  child.kill=()=>{closeChild=()=>child.emit('close',null,'SIGKILL');};
+  const queue=new DurableQueue({file:path.join(temporaryDirectory(t),'downloads.json'),cleanup(){},
+    retain(){retained=true;return {retainedBytes:42,resumable:true};},execute:async(job,active)=>{
+      active.children.add(child);
+      active.trackWriter(new Promise(resolve=>{closeWriter=resolve;}));
+      await new Promise(()=>{}); // A hung metadata response must not block pause.
+    }});
+  const job=queue.add({source:'manual',url:'https://youtu.be/a'});
+  const pausing=queue.pauseJob(job.id);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(retained,false);closeChild();
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(retained,false);closeWriter();await pausing;
+  assert.equal(job.status,'paused');assert.equal(job.retainedBytes,42);
+  queue.update(job.id,{status:'complete'});assert.equal(job.status,'paused');
+  await queue.shutdown();
+});
+
+test('bounded network retries respect global stop and manual pause', async t=>{
+  let queue;t.after(()=>queue?.shutdown());
+  queue=new DurableQueue({file:path.join(temporaryDirectory(t),'downloads.json'),cleanup(){},retryDelays:[10,10,10],
+    retain(){return {resumable:true,retainedBytes:2};},execute:async()=>{throw new Error('Connection interrupted');}});
+  const job=queue.add({source:'manual',url:'https://youtu.be/a'});
+  await eventually(()=>job.status==='waiting-network');queue.pause(true);
+  const count=job.retryCount;await new Promise(resolve=>setTimeout(resolve,30));assert.equal(job.retryCount,count);
+  queue.pause(false);
+  await eventually(()=>job.retryCount===3 && job.status==='waiting-network' && job.nextRetryAt===null);
+  queue.retry(job.id);await eventually(()=>job.status==='waiting-network');await queue.pauseJob(job.id);
+  await new Promise(resolve=>setTimeout(resolve,30));assert.equal(job.status,'paused');assert.equal(job.nextRetryAt,null);
+});
+
+test('failed quality cleanup preserves held state; smaller-copy changes preserve original input', t=>{
+  const queue=new DurableQueue({file:path.join(temporaryDirectory(t),'downloads.json'),cleanup(){throw new Error('Cannot remove files');},execute:async()=>{}});
+  queue.pause(true);
+  const youtube=queue.add({url:'https://youtu.be/a',quality:'720p'});
+  queue.update(youtube.id,{status:'paused',retainedBytes:50,resumable:true});
+  assert.throws(()=>queue.retry(youtube.id,{quality:'480p'}),/Cannot remove files/);
+  assert.equal(youtube.quality,'720p');assert.equal(youtube.status,'paused');assert.equal(youtube.retainedBytes,50);
+  const server=queue.add({provider:'plex',url:'plex://server/1',quality:'original',copyQuality:'original'});
+  queue.update(server.id,{status:'paused',retainedBytes:100,resumable:true});
+  queue.retry(server.id,{copyQuality:'720p'});
+  assert.equal(server.copyQuality,'720p');assert.equal(server.retainedBytes,100);
 });
 
 test('waiting jobs deduplicate and old canceled jobs cannot be retried beside a duplicate', async (t) => {

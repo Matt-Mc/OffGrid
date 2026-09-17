@@ -25,6 +25,10 @@ Development runs use an installed mpv for native playback. Packaged Mac builds r
 | `src/styles.css`, `.impeccable.md` | Visual styles and agreed product design context |
 | `electron/main.cjs` | App lifecycle, IPC, managed tools, shared download execution, and storage integration |
 | `electron/backend-core.cjs` | Durable serial queue, storage admission, settings validation, and persistence helpers |
+| `electron/download-checkpoints.cjs`, `electron/download-recovery.cjs`, `electron/asset-recovery.cjs` | Owned working files, interrupted transfers, and durable media/asset finalization |
+| `electron/download-services.cjs`, `electron/youtube-playlists.cjs`, `electron/batch-downloads.cjs` | Bounded previews, atomic batch queueing, and storage projection |
+| `electron/range-transfer.cjs`, `electron/media-assets.cjs`, `electron/media-conversion.cjs` | Validated HTTP resume, normalized text subtitles, and local smaller copies |
+| `electron/link-capture.cjs`, `extensions/chromium/` | Validated persistent link drafts and browser handoff |
 | `electron/preload.cjs` | Renderer-facing API |
 | `electron/plex-client.cjs`, `electron/jellyfin-client.cjs` | Local server protocols, metadata normalization, and original-file transfers |
 | `electron/*-connection.cjs` | Encrypted credentials and connection state |
@@ -42,13 +46,14 @@ npm run test:ui
 npm run test:plex-ui
 npm run test:jellyfin-ui
 npm run test:updates-ui
+npm run test:features-ui
 ```
 
 Backend tests exercise real application code with isolated files, mocked OS facilities, and local HTTP fixtures. They need permission to bind loopback sockets. They do not contact personal media servers or download actual YouTube content.
 
 UI smoke scripts launch a separate Electron process with temporary app data and print the screenshot directory. They require a graphical desktop session. The server UI tests use disposable credentials and the real OS credential storage. Native mpv launching is disabled in those fixtures; actual native playback requires separate verification.
 
-At the 0.3.1 implementation checkpoint, 150 backend, packaging, and updater tests passed on macOS Apple Silicon. Plex/Jellyfin UI checks, update-banner fixtures, and native bundled-player playback, pause/resume, and saved-position checks also passed. Those results are fixture verification, not proof of live YouTube/Jellyfin behavior or cross-platform support. A live Plex connection was confirmed separately during personal use.
+At the 2026-09-16 feature implementation checkpoint, 241 backend, recovery, media, packaging, and updater tests passed with no skips on macOS Apple Silicon. Source Electron checks passed for the general library/player UI (including loaded offline subtitle cues), Plex/Jellyfin fixture flows, update banners, and the expanded Downloads/Servers controls. These results use disposable files, local fixture servers, and mocked downloader paths where appropriate; they do not prove current live YouTube or personal-server behavior. See the [feature verification record](feature-expansion-plan.md#implementation-and-verification-record) for package and native-runtime checks.
 
 For a packaged server UI test on macOS:
 
@@ -83,12 +88,29 @@ Do not commit application data, real server tokens, passwords, or private media.
 
 ## Storage and cancellation contracts
 
-- Count videos, thumbnails, and temporary media against the optional library cap; keep existing files when a new download does not fit.
-- Reserve 2 GB of free disk space. YouTube jobs reserve three times the estimated size plus 16 MB; original Plex/Jellyfin files reserve one copy plus 16 MB.
+- Count videos, subtitles, thumbnails, and retained temporary media against the optional library cap; keep existing files when a new download does not fit.
+- Reserve 2 GB of free disk space. YouTube jobs reserve three times the estimated size plus 16 MB; original Plex/Jellyfin files reserve one copy plus 16 MB. Smaller server copies reserve twice the original size plus 32 MB. Verified retained bytes reduce additional reservation; they remain counted in current usage.
 - Check active jobs for storage violations. This is a logical budget, not an OS-enforced quota; buffering and changing estimates can briefly exceed it.
-- Reject late writes after cancellation. Clean up owned partial files without deleting completed media.
+- Pause, storage holds, and recoverable failures retain validated working files. Cancel/discard removes only owned unfinished files after all writers close. Completed media is preserved.
 - Preserve provider/source identities across retries and restarts. Disconnecting one server must not cancel another provider's work.
 - Never send credentials to public destinations or redirects. Never put tokens in media URLs or renderer responses.
+
+Additional local runtime/package checks:
+
+```bash
+node scripts/smoke-download-runtime.cjs
+node scripts/smoke-packaged-capture.cjs
+```
+
+The first requires local yt-dlp/FFmpeg and the bundled mpv runtime. The second requires a freshly built `release/mac-arm64/Offgrid.app` and checks argv/second-instance captures with disposable app data. It does not invoke the system protocol handler or validate Chrome/Edge confirmation dialogs.
+
+## Link capture and media recovery
+
+The packaged app registers `offgrid://add?url=<encoded YouTube URL>`. Captures are persistent drafts, never download commands. Single-instance/open-url events feed a bounded inbox; only the trusted main renderer may use IPC. Install the optional extension using its [local instructions](../extensions/chromium/README.md). Chrome/Edge store publication and native macOS Share integration are separate work.
+
+Queue schema 2 and per-job checkpoints preserve compatible inputs. Unsupported/corrupt state is preserved and held for attention. Server append requires a strong ETag, exact `Content-Range`, fresh provider metadata, and validated local destinations. Final media and subtitle retries use journals so a crash between file moves and library persistence can be reconciled.
+
+Subtitles are bounded to 5 MB per text file, normalized to VTT, and served only from library-owned asset IDs. Smaller copies use managed FFmpeg, preserve all audio tracks, extract up to two supported embedded text subtitles, and validate dimensions, duration, audio count, full decoding, and smaller size before commit. HDR and unsupported subtitle formats retain the original for an explicit fallback. No personal server was used to establish server-side download optimization, so the common path is local conversion.
 
 ## Packaging
 

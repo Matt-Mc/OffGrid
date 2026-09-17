@@ -24,7 +24,7 @@ async function main() {
   ]);
   if (clip.status !== 0) throw new Error('UI smoke test needs ffmpeg on PATH to create a local playback fixture.');
   const videos = [
-    { id: 'sample', title: 'A quieter way to travel', channel: 'Weekend Journal', playbackPositionSeconds: 12, watched: false },
+    { id: '22222222-2222-4222-8222-222222222222', title: 'A quieter way to travel', channel: 'Weekend Journal', playbackPositionSeconds: 12, watched: false },
     { id: 'forest', title: 'Walking the forest trail', channel: 'Slow Outside', playbackPositionSeconds: 0, watched: false },
     { id: 'coffee', title: 'Coffee before the train', channel: 'Everyday Notes', playbackPositionSeconds: 60, watched: true },
   ].map((item, index) => {
@@ -35,6 +35,11 @@ async function main() {
     fs.writeFileSync(thumbnailPath, `<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360"><rect width="640" height="360" fill="${colors[index]}"/><circle cx="490" cy="90" r="36" fill="#efe4c7"/><path d="M0 280L150 130L310 270L450 160L640 290V360H0Z" fill="#344e42"/><path d="M0 325L200 240L440 330L640 260V360H0Z" fill="#253d32"/></svg>`);
     return { ...item, duration: 60, sourceId: `fixture-${item.id}`, url: `https://www.youtube.com/watch?v=fixture-${item.id}`, filePath, thumbnailPath, sizeBytes: fs.statSync(filePath).size, savedAt: new Date(Date.now() - index * 86400000).toISOString(), comments: [], channelUrl: 'https://www.youtube.com/@fixture' };
   });
+  const assetId=crypto.randomUUID();
+  const assetDirectory=path.join(temporary,'videos','.assets');fs.mkdirSync(assetDirectory);
+  const assetPath=path.join(assetDirectory,`${videos[0].id}.${assetId}.vtt`);
+  fs.writeFileSync(assetPath,'WEBVTT\n\n00:00:00.000 --> 00:00:59.000\nOffline fixture subtitles.\n');
+  videos[0].assets=[{id:assetId,kind:'subtitle',language:'en',format:'vtt',origin:'manual',filePath:assetPath,sizeBytes:fs.statSync(assetPath).size}];
   fs.writeFileSync(path.join(temporary, 'library.json'), JSON.stringify(videos));
   fs.writeFileSync(path.join(temporary, 'settings.json'), JSON.stringify({ version: 1, defaultQuality: '720p', saveComments: false, maxLibraryBytes: null, autoDownload: false, checkIntervalHours: 6, recentVideoCount: 3 }));
   fs.writeFileSync(path.join(temporary, 'subscriptions.json'), JSON.stringify([{ id: 'channel-fixture', channel: 'Weekend Journal', channelUrl: 'https://www.youtube.com/@fixture', autoDownload: false, addedAt: new Date().toISOString(), lastCheckedAt: null }]));
@@ -140,13 +145,15 @@ async function main() {
     await click('Library');
     await click('Play A quieter way to travel');
     await waitFor(`document.querySelector('video')?.readyState >= 1`);
+    await evaluate(`document.querySelector('video').textTracks[0].mode='showing'`);
+    await waitFor(`document.querySelector('track')?.readyState === 2 && document.querySelector('video').textTracks[0].cues?.length > 0`);
     await evaluate(`(() => { window.__smokePlayer = document.querySelector('video'); window.__smokePlayer.pause(); window.__smokePlayer.currentTime = 24; })()`);
     await click('Settings');
     assert.equal(await evaluate(`document.querySelector('video') === window.__smokePlayer`), true, 'Navigation preserves the mounted player');
     await capture('settings-with-player');
     await click('Close player');
     await waitFor(`!document.querySelector('video')`);
-    const watchedVideo = (await evaluate('window.offgrid.listVideos()')).find(video => video.id === 'sample');
+    const watchedVideo = (await evaluate('window.offgrid.listVideos()')).find(video => video.id === '22222222-2222-4222-8222-222222222222');
     assert.ok(watchedVideo.playbackPositionSeconds >= 23, 'Closing the player saves playback progress');
     await call('Emulation.setDeviceMetricsOverride', { width: 820, height: 720, deviceScaleFactor: 1, mobile: false });
     await capture('settings-narrow');
@@ -154,17 +161,19 @@ async function main() {
     await click('Library');
     await click('Play A quieter way to travel');
     await waitFor(`document.querySelector('video')?.readyState >= 1`);
+    await evaluate(`document.querySelector('video').textTracks[0].mode='showing'`);
+    await waitFor(`document.querySelector('track')?.readyState === 2 && document.querySelector('video').textTracks[0].cues?.length > 0`);
     await click('Settings');
     await click('Manage saved videos');
     await evaluate(`(() => { const row = [...document.querySelectorAll('.storage-video-row')].find(row => row.textContent.includes('A quieter way to travel')); row.querySelector('input').click(); })()`);
     await evaluate(`document.querySelector('.manager-actions button').click()`);
     await waitFor(`document.querySelector('dialog')?.open`);
     await click('Delete permanently');
-    await waitFor(`window.offgrid.listVideos().then(videos => !videos.some(video => video.id === 'sample'))`);
+    await waitFor(`window.offgrid.listVideos().then(videos => !videos.some(video => video.id === '22222222-2222-4222-8222-222222222222'))`);
     await sleep(250);
     assert.equal(await evaluate(`!!document.querySelector('.app-error')`), false, 'Deleting the playing video does not surface a stale playback error');
     assert.equal(exceptions.length, 0, `No renderer exceptions: ${JSON.stringify(exceptions)}`);
-    console.log(JSON.stringify({ ok: true, screenshots, fixtureDirectory: temporary, checks: ['Library renders local fixtures', 'Preferences persist through IPC and Settings controls', 'Storage reports real files', 'Settings, Downloads, Following render', 'Playback survives navigation and saves progress', 'Queue cancel/retry controls', 'Delete playing video without stale errors', 'No horizontal overflow at 820px', 'No renderer exceptions'] }, null, 2));
+    console.log(JSON.stringify({ ok: true, screenshots, fixtureDirectory: temporary, checks: ['Library renders local fixtures', 'Preferences persist through IPC and Settings controls', 'Storage reports real files', 'Settings, Downloads, Following render', 'Playback survives navigation and saves progress', 'Offline HTML subtitle cues load and display', 'Queue cancel/retry controls', 'Delete playing video without stale errors', 'No horizontal overflow at 820px', 'No renderer exceptions'] }, null, 2));
   } finally {
     if (socket) socket.close();
     proc.kill('SIGTERM');

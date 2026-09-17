@@ -15,6 +15,7 @@
     "dist": "npm run build && electron-builder --mac dmg --arm64 --publish never",
     "test:jellyfin-ui": "npm run build && node scripts/smoke-jellyfin-ui.cjs",
     "test:updates-ui": "npm run build && node scripts/smoke-updates-ui.cjs",
+    "test:features-ui": "npm run build && node scripts/smoke-download-features-ui.cjs",
     "bundle:mpv": "node scripts/bundle-mpv.cjs",
     "bundle:mpv-sources": "node scripts/collect-mpv-sources.cjs",
     "verify:mpv": "node scripts/verify-bundled-mpv.cjs"
@@ -34,6 +35,7 @@
   "build": {
     "appId": "com.offgrid.videolibrary",
     "productName": "Offgrid",
+    "protocols": [{"name":"Send to Offgrid","schemes":["offgrid"]}],
     "files": [
       "dist/**/*",
       "electron/**/*",

@@ -7,17 +7,17 @@ const https = require('node:https');
 const dns = require('node:dns').promises;
 const net = require('node:net');
 const fs = require('node:fs');
-const { pipeline } = require('node:stream/promises');
-const { Transform } = require('node:stream');
+const { rangeTransfer, RangeTransferError } = require('./range-transfer.cjs');
 
 const PAGE_SIZE = 100;
 const METADATA_LIMIT = 4 * 1024 * 1024;
 const REQUEST_TIMEOUT = 15_000;
 const DOWNLOAD_IDLE_TIMEOUT = 30_000;
+const SUBTITLE_LIMIT = 5 * 1024 * 1024;
 const EXTENSIONS = new Set(['mp4', 'mkv', 'avi', 'mov', 'webm', 'm4v', 'mpg', 'mpeg', 'ts', 'm2ts', 'wmv', 'flv', 'vob', 'ogv', '3gp']);
 
 class PlexError extends Error {
-  constructor(message, code = 'PLEX_ERROR') { super(message); this.name = 'PlexError'; this.code = code; }
+  constructor(message, code = 'PLEX_ERROR', { retryable = false } = {}) { super(message); this.name = 'PlexError'; this.code = code; this.retryable = retryable; }
 }
 function cancelled() { return new PlexError('Plex download cancelled.', 'ABORT_ERR'); }
 const NETWORK_ERROR_TYPES = new Map([
@@ -46,9 +46,22 @@ function networkError(error, { platform = process.platform, fallback = 'Could no
     interrupted: 'The Plex connection was interrupted. Check the network connection and retry.',
     tls: 'Could not establish a secure connection to Plex. Check the HTTPS address and the server certificate; certificate verification must succeed.'
   };
-  return type ? new PlexError(`${messages[type]} (${code})`, code) : new PlexError(fallback);
+  return type ? new PlexError(`${messages[type]} (${code})`, code, { retryable: ['EHOSTUNREACH', 'ENETUNREACH', 'ECONNREFUSED', 'EAI_AGAIN', 'ETIMEDOUT', 'ECONNRESET', 'ECONNABORTED', 'EPIPE', 'ERR_STREAM_PREMATURE_CLOSE'].includes(code) }) : new PlexError(fallback);
+}
+function transientStatus(status) { return status === 408 || status === 429 || status >= 500; }
+function providerStatusError(status) {
+  const code = `HTTP_${status}`;
+  const message = status === 401 || status === 403 ? 'Plex authentication failed. Check the token and library access.'
+    : status >= 300 && status < 400 ? 'Plex redirects are not supported. Use the local server address.'
+      : 'Plex could not provide the requested media.';
+  return new PlexError(message, code, { retryable: transientStatus(status) });
 }
 function positiveSize(value) { const n = Number(value); return Number.isSafeInteger(n) && n > 0 ? n : null; }
+function nonNegativeInteger(value) {
+  if (!(typeof value === 'number' && Number.isFinite(value)) && !(typeof value === 'string' && /^\d+$/.test(value))) return null;
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number >= 0 ? number : null;
+}
 function cleanText(value, fallback = '') { return typeof value === 'string' ? value.replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 500) : fallback; }
 function validateId(value) {
   const id = String(value ?? '');
@@ -107,8 +120,33 @@ function normalizeItem(item) {
   const subtitle = type === 'movie' ? (item.year ? String(item.year).slice(0, 4) : '')
     : type === 'episode' ? `${channel} · S${Number(item.parentIndex) || 0} E${Number(item.index) || 0}`
       : type === 'season' ? channel : (Number.isSafeInteger(Number(item.leafCount)) ? `${Number(item.leafCount)} episodes` : '');
+  const seasonNumber = type === 'episode' ? nonNegativeInteger(item.parentIndex) : null;
+  const episodeNumber = type === 'episode' ? nonNegativeInteger(item.index) : null;
   return { id, type, title, subtitle, channel, duration: Number.isFinite(duration) && duration >= 0 ? Math.floor(duration / 1000) : 0,
-    sizeBytes, downloadable: (type === 'movie' || type === 'episode') && Boolean(part && sizeBytes) };
+    seasonNumber, episodeNumber, sizeBytes, downloadable: (type === 'movie' || type === 'episode') && Boolean(part && sizeBytes) };
+}
+
+function subtitleFormat(stream) {
+  const codec = String(stream?.codec || '').toLowerCase();
+  const format = String(stream?.format || '').toLowerCase();
+  if (codec === 'srt' || codec === 'subrip' || format === 'srt' || format === 'subrip') return 'srt';
+  if (codec === 'vtt' || codec === 'webvtt' || format === 'vtt' || format === 'webvtt') return 'vtt';
+  const key = typeof stream?.key === 'string' ? stream.key : '';
+  const match = /\.(vtt|srt)$/i.exec(key);
+  return match ? match[1].toLowerCase() : null;
+}
+function externalSubtitleTracks(row, itemId) {
+  const media = Array.isArray(row?.Media) ? row.Media[0] : null;
+  const parts = Array.isArray(media?.Part) ? media.Part : [];
+  if (parts.length !== 1 || !Array.isArray(parts[0]?.Stream)) return [];
+  return parts[0].Stream.filter(stream => stream?.streamType === 3 && [true, 1, '1'].includes(stream.external))
+    .map(stream => {
+      const streamId = String(stream.id ?? '');
+      const format = subtitleFormat(stream);
+      if (!/^\d{1,20}$/.test(streamId) || !format) return null;
+      const language = cleanText(stream.languageCode || stream.language, 'und').slice(0, 32) || 'und';
+      return { id: `${itemId}.${streamId}`, language, format, origin: 'external' };
+    }).filter(Boolean).slice(0, 100);
 }
 
 class PlexClient {
@@ -128,7 +166,7 @@ class PlexClient {
       const results = await Promise.race([
         dns.lookup(hostname, { all: true, verbatim: true }),
         new Promise((_, reject) => {
-          timer = setTimeout(() => reject(new PlexError('Plex server lookup timed out.')), REQUEST_TIMEOUT);
+          timer = setTimeout(() => reject(new PlexError('Plex server lookup timed out.', 'ETIMEDOUT', { retryable: true })), REQUEST_TIMEOUT);
           abort = () => reject(cancelled());
           signal?.addEventListener('abort', abort, { once: true });
         })
@@ -141,7 +179,11 @@ class PlexClient {
     } finally { clearTimeout(timer); if (abort) signal?.removeEventListener('abort', abort); }
   }
 
-  async _request(path, { signal, download = false, headers = {} } = {}) {
+  async _request(path, { signal, download = false, headers = {}, allowRangeResponses = false } = {}) {
+    if (allowRangeResponses) {
+      if (!download || typeof path !== 'string' || !path.endsWith('?download=1')) throw new PlexError('Range responses are restricted to original media downloads.');
+      validatePartKey(path.slice(0, -'?download=1'.length));
+    }
     const address = await this._resolve(signal);
     if (signal?.aborted) throw cancelled();
     const url = new URL(this.baseUrl);
@@ -158,19 +200,16 @@ class PlexClient {
           'X-Plex-Token': this.#token, 'X-Plex-Product': 'Offgrid', 'X-Plex-Client-Identifier': 'offgrid-local', ...headers }
       }, response => {
         response.on('error', () => {});
-        if (response.statusCode !== 200) {
+        if (response.statusCode !== 200 && !(allowRangeResponses && [206, 416].includes(response.statusCode))) {
           response.destroy();
-          const message = response.statusCode === 401 || response.statusCode === 403 ? 'Plex authentication failed. Check the token and library access.'
-            : response.statusCode >= 300 && response.statusCode < 400 ? 'Plex redirects are not supported. Use the local server address.'
-              : 'Plex could not provide the requested media.';
-          reject(new PlexError(message));
+          reject(providerStatusError(response.statusCode));
         } else if (response.headers['content-encoding'] && response.headers['content-encoding'] !== 'identity') {
           response.destroy(); reject(new PlexError('Plex returned an unsupported encoded response.'));
         } else resolve(response);
       });
       request.on('error', error => reject(networkError(error)));
-      request.setTimeout(download ? DOWNLOAD_IDLE_TIMEOUT : REQUEST_TIMEOUT, () => request.destroy(new PlexError('Plex connection timed out.')));
-      if (!download) deadline = setTimeout(() => request.destroy(new PlexError('Plex request timed out.')), REQUEST_TIMEOUT);
+      request.setTimeout(download ? DOWNLOAD_IDLE_TIMEOUT : REQUEST_TIMEOUT, () => request.destroy(new PlexError('Plex connection timed out.', 'ETIMEDOUT', { retryable: true })));
+      if (!download) deadline = setTimeout(() => request.destroy(new PlexError('Plex request timed out.', 'ETIMEDOUT', { retryable: true })), REQUEST_TIMEOUT);
       request.on('close', () => { clearTimeout(deadline); signal?.removeEventListener('abort', abort); });
       signal?.addEventListener('abort', abort, { once: true });
       request.end();
@@ -236,41 +275,68 @@ class PlexClient {
     const partKey = validatePartKey(parts[0].key);
     const extension = String(parts[0].container || media.container || '').toLowerCase();
     if (!EXTENSIONS.has(extension)) throw new PlexError('This Plex media container is not supported yet.');
-    return { ...item, partKey, extension };
+    return { ...item, partKey, extension, subtitleTracks: externalSubtitleTracks(row, id) };
   }
 
-  async download(metadata, destination, { signal, onProgress } = {}) {
+  async subtitleTracks(id, { signal } = {}) {
+    return (await this.metadata(id, { signal })).subtitleTracks;
+  }
+
+  async download(metadata, destination, { signal, onProgress, resumeState, onCheckpoint, retainOnError = false } = {}) {
     const partKey = validatePartKey(metadata?.partKey);
     const expected = positiveSize(metadata?.sizeBytes);
     if (!expected) throw new PlexError('Plex did not provide the original file size.');
     if (signal?.aborted) throw cancelled();
-    let file, response, responseError, downloadedBytes = 0;
+    const revalidate = async () => {
+      if (!/^\d{1,20}$/.test(String(metadata?.id ?? ''))) return false;
+      const fresh = await this.metadata(metadata.id, { signal });
+      return fresh.partKey === partKey && fresh.sizeBytes === expected && fresh.extension === metadata.extension;
+    };
     try {
-      // Create exclusively so a failed transfer never removes an existing file.
-      file = await fs.promises.open(destination, 'wx', 0o600);
-      response = await this._request(`${partKey}?download=1`, { signal, download: true });
-      response.on('error', error => { responseError = error; });
-      const contentLength = response.headers['content-length'];
-      if (contentLength !== undefined && positiveSize(contentLength) !== expected) throw new PlexError('Plex file size changed. Refresh the library and try again.');
-      const progress = new Transform({ transform(chunk, _encoding, callback) {
-        downloadedBytes += chunk.length;
-        if (downloadedBytes > expected) return callback(new PlexError('Plex sent more data than the original file size.'));
-        try { onProgress?.({ downloadedBytes, totalBytes: expected, progress: Math.min(100, downloadedBytes / expected * 100) }); }
-        catch { return callback(new PlexError('Plex download progress could not be recorded.')); }
-        callback(null, chunk);
-      } });
-      await pipeline(response, progress, file.createWriteStream(), { signal });
-      if (downloadedBytes !== expected) throw new PlexError('Plex download was incomplete. Please retry.');
-      return { sizeBytes: downloadedBytes };
+      return await rangeTransfer({
+        request: headers => this._request(`${partKey}?download=1`, { signal, download: true, headers, allowRangeResponses: true }),
+        destination, totalBytes: expected, signal, onProgress, resumeState, onCheckpoint, retainOnError,
+        revalidate: resumeState === undefined ? undefined : revalidate, errorPrefix: 'Plex',
+        isProviderError: error => error instanceof PlexError,
+        mapError: error => networkError(error, { fallback: 'Plex download failed or was interrupted. Please retry.' })
+      });
     } catch (error) {
-      response?.destroy();
-      if (file) { await file.close().catch(() => {}); await fs.promises.unlink(destination).catch(() => {}); }
       if (signal?.aborted || error.code === 'ABORT_ERR') throw cancelled();
+      if (error instanceof RangeTransferError) throw new PlexError(error.message, error.code, { retryable: error.retryable });
       if (error instanceof PlexError) throw error;
-      if (error.code === 'EEXIST') throw new PlexError('A file already exists at this download destination.');
-      if (responseError) throw networkError(responseError, { fallback: 'Plex download failed or was interrupted. Please retry.' });
-      throw new PlexError('Plex download failed or was interrupted. Please retry.');
-    } finally { if (file) await file.close().catch(() => {}); }
+      throw new PlexError('Plex download failed or was interrupted. Please retry.', error?.code || 'PLEX_ERROR', { retryable: error?.retryable === true });
+    }
+  }
+
+  async downloadSubtitle(track, destination, { signal } = {}) {
+    const id = String(track?.id ?? '');
+    const format = String(track?.format ?? '').toLowerCase();
+    if (!/^\d{1,20}\.\d{1,20}$/.test(id) || !['vtt', 'srt'].includes(format)) throw new PlexError('Invalid Plex subtitle selection.');
+    const [itemId, streamId] = id.split('.');
+    const metadata = await this.metadata(itemId, { signal });
+    if (!metadata.subtitleTracks.some(candidate => candidate.id === id && candidate.format === format)) throw new PlexError('The selected Plex subtitle is no longer available.');
+    const response = await this._request(`/library/streams/${streamId}.${format}`, { signal, download: true });
+    try {
+      const type = String(response.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+      if (type && !['text/vtt', 'text/plain', 'application/x-subrip', 'application/octet-stream'].includes(type)) throw new PlexError('Plex returned an unsupported subtitle format.');
+      const length = response.headers['content-length'];
+      if (length !== undefined && (!/^\d+$/.test(String(length)) || Number(length) > SUBTITLE_LIMIT)) throw new PlexError('Plex subtitle is too large.');
+      const chunks = []; let sizeBytes = 0;
+      for await (const chunk of response) {
+        if (signal?.aborted) throw cancelled();
+        sizeBytes += chunk.length;
+        if (sizeBytes > SUBTITLE_LIMIT) throw new PlexError('Plex subtitle is too large.');
+        chunks.push(chunk);
+      }
+      const contents = Buffer.concat(chunks);
+      if (!sizeBytes) throw new PlexError('Plex returned an empty subtitle.');
+      if (length !== undefined && sizeBytes !== Number(length)) throw new PlexError('Plex subtitle download was incomplete.');
+      const text = contents.toString('utf8');
+      if (text.includes('\u0000') || text.includes('\ufffd')) throw new PlexError('Plex returned invalid subtitle text.');
+      if (signal?.aborted) throw cancelled();
+      await fs.promises.writeFile(destination, contents, { flag: 'wx', mode: 0o600 });
+      return { sizeBytes, format };
+    } catch (error) { response.destroy(); if (signal?.aborted) throw cancelled(); if (error instanceof PlexError) throw error; throw networkError(error, { fallback: 'Plex subtitle download failed. Please retry.' }); }
   }
 }
 
