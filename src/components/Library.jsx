@@ -1,11 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { EmptyState, Icon, Thumbnail, formatBytes, formatDuration } from './shared';
+import { EmptyState, ErrorMessage, Icon, Thumbnail, formatBytes, formatDuration } from './shared';
 function VideoCard({
   video,
   onPlay,
   onDelete,
-  onWatched
+  onWatched,
+  onRetrySubtitles
 }) {
+  const [subtitleBusy,setSubtitleBusy] = useState(false);
+  const [subtitleError,setSubtitleError] = useState('');
+  async function retrySubtitles(){setSubtitleBusy(true);setSubtitleError('');try{await onRetrySubtitles(video);}catch(error){setSubtitleError(error.message);}finally{setSubtitleBusy(false);}}
   const progress = video.duration ? Math.min(100, (video.playbackPositionSeconds || 0) / video.duration * 100) : 0;
   return <article className="video-card">
     <button className="card-visual" onClick={() => onPlay(video)} aria-label={`Play ${video.title}`}>
@@ -32,7 +36,7 @@ function VideoCard({
           {video.channel}
         </p>
         <span className="video-size">
-          {video.provider === 'plex' ? 'Plex · ' : video.provider === 'jellyfin' ? 'Jellyfin · ' : ''}{formatBytes(video.sizeBytes)}
+          {video.provider === 'plex' ? 'Plex · ' : video.provider === 'jellyfin' ? 'Jellyfin · ' : ''}{formatBytes(video.sizeBytes)}{video.copyQuality === '720p' ? ' · Smaller copy' : ''}
         </span>
       </div>
       <details className="overflow-menu">
@@ -51,6 +55,9 @@ function VideoCard({
         </div>
       </details>
     </div>
+    {(video.assets || []).some(asset => asset.kind === 'subtitle') && <p className="card-subtitle-note">Subtitles · {video.assets.filter(asset => asset.kind === 'subtitle').map(asset => asset.language || 'Unknown').join(', ')}</p>}
+    {video.assetWarnings?.length > 0 && <div className="card-subtitle-warning"><p>Video ready · some subtitles unavailable</p><details><summary>Subtitle details</summary>{video.assetWarnings.map((warning,index) => <p key={index}>{warning}</p>)}</details>{onRetrySubtitles && <button className="text-button" disabled={subtitleBusy} onClick={retrySubtitles}>{subtitleBusy ? 'Retrying subtitles…' : 'Retry subtitles'}</button>}</div>}
+    <ErrorMessage>{subtitleError}</ErrorMessage>
   </article>;
 }
 export function Library({
@@ -58,7 +65,8 @@ export function Library({
   onAdd,
   onPlay,
   onDelete,
-  onWatched
+  onWatched,
+  onRetrySubtitles
 }) {
   const [query, setQuery] = useState('');
   const [sort, setSort] = useState('recent');
@@ -68,7 +76,8 @@ export function Library({
   const cardProps = {
     onPlay,
     onDelete,
-    onWatched
+    onWatched,
+    onRetrySubtitles
   };
   return <>
     <header className="page-header">
@@ -186,7 +195,7 @@ export function Player({
       <video ref={element} src={window.offgrid.videoUrl(video.id)} autoPlay controls onLoadedMetadata={() => {
         metadataReady.current = true;
         if (video.playbackPositionSeconds && !video.watched) element.current.currentTime = Math.min(video.playbackPositionSeconds, element.current.duration || Infinity);
-      }} onTimeUpdate={() => persist()} onPause={() => persist(true)} onEnded={() => persist(true, true)} onError={() => onProgress(video.id, null, 'This video could not be played. The saved file may be missing or unsupported.')} />
+      }} onTimeUpdate={() => persist()} onPause={() => persist(true)} onEnded={() => persist(true, true)} onError={() => onProgress(video.id, null, 'This video could not be played. The saved file may be missing or unsupported.')} >{(video.assets || []).filter(asset => asset.kind === 'subtitle' && asset.format === 'vtt').map(asset => <track key={asset.id} kind="subtitles" srcLang={asset.language || 'und'} label={asset.language || 'Subtitles'} src={window.offgrid.subtitleUrl(video.id,asset.id)}/>)}</video>
     </div>
     <div className="player-details">
       <div>

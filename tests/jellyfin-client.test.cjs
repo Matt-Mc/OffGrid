@@ -9,6 +9,7 @@ const { JellyfinClient, normalizeServerUrl, validateId, networkError } = require
 const { JellyfinConnection } = require('../electron/jellyfin-connection.cjs');
 const TOKEN = 'fixture-private-token', PASSWORD = 'fixture-private-password';
 const USER = 'c'.repeat(32), MOVIE = 'a'.repeat(32), SECTION = 'b'.repeat(32);
+const MEDIA_SOURCE = 'd'.repeat(32);
 const movie = { Id: MOVIE, Type: 'Movie', Name: 'Test film', ProductionYear: 2025, RunTimeTicks: 123450000,
   CanDownload: true, Path: '/media/film.mkv', VideoType: 'VideoFile', MediaSources: [{ Protocol: 'File', Path: '/media/film.mkv', Container: 'mkv', Size: 8 }] };
 function json(res, value) { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(value)); }
@@ -112,6 +113,14 @@ test('Jellyfin libraries, pagination, search, series and episode data are normal
   await assert.rejects(client.browse({ sectionId: SECTION, start: -1 }), /Invalid Jellyfin browsing/);
 });
 
+test('Jellyfin episode normalization exposes numeric season and episode numbers', async t => {
+  const episode = { ...movie, Id: SECTION, Type: 'Episode', ParentIndexNumber: 4, IndexNumber: 9 };
+  const { client } = await fixture(t, (_req, res) => json(res, { Items: [episode], TotalRecordCount: 1 }));
+  const result = await client.browse({ sectionId: SECTION });
+  assert.equal(result.items[0].seasonNumber, 4);
+  assert.equal(result.items[0].episodeNumber, 9);
+});
+
 test('Jellyfin original metadata enforces download permission, one source, matching file and supported container', async t => {
   let row = structuredClone(movie);
   const { client } = await fixture(t, (_req, res) => json(res, row));
@@ -125,6 +134,34 @@ test('Jellyfin original metadata enforces download permission, one source, match
   for (const change of [r => r.MediaSources[0].Protocol = 'Http', r => r.MediaSources[0].Path = '/different/version.mkv', r => r.MediaSources[0].Size = 0, r => r.MediaSources[0].Container = 'exe', r => r.MediaSources[0].IsInfiniteStream = true, r => r.VideoType = 'Iso']) {
     row = structuredClone(movie); change(row); await assert.rejects(client.metadata(MOVIE), /unavailable or uses an unsupported/);
   }
+});
+
+test('Jellyfin exposes only external VTT/SRT subtitle IDs and revalidates before download', async t => {
+  let row = structuredClone(movie);
+  row.MediaSources[0].Id = MEDIA_SOURCE;
+  row.MediaSources[0].MediaStreams = [
+    { Index: 2, Type: 'Subtitle', IsExternal: true, Codec: 'subrip', Language: 'en' },
+    { Index: 3, Type: 'Subtitle', IsExternal: true, IsExternalUrl: true, Codec: 'vtt', Language: 'fr' },
+    { Index: 4, Type: 'Subtitle', IsExternal: false, Codec: 'vtt', Language: 'en' },
+    { Index: 5, Type: 'Subtitle', IsExternal: true, Codec: 'ass', Language: 'en' }
+  ];
+  const { client, requests } = await fixture(t, (req, res) => {
+    if (req.url === `/jellyfin/Videos/${MOVIE}/${MEDIA_SOURCE}/Subtitles/2/Stream.srt`) {
+      res.writeHead(200, { 'Content-Type': 'text/plain', 'Content-Length': 27 });
+      return res.end('1\n00:00:00 --> 00:00:01\nHi\n');
+    }
+    json(res, row);
+  }, '/jellyfin');
+  const tracks = await client.subtitleTracks(MOVIE);
+  assert.deepEqual(tracks, [{ id: `${MOVIE}.${MEDIA_SOURCE}.2`, language: 'en', format: 'srt', origin: 'external' }]);
+  const dest = path.join(directory(t), 'captions.srt');
+  assert.deepEqual(await client.downloadSubtitle(tracks[0], dest), { sizeBytes: 27, format: 'srt' });
+  assert.equal(fs.readFileSync(dest, 'utf8'), '1\n00:00:00 --> 00:00:01\nHi\n');
+  assert.equal(requests.at(-1).url, `/jellyfin/Videos/${MOVIE}/${MEDIA_SOURCE}/Subtitles/2/Stream.srt`);
+  await assert.rejects(client.downloadSubtitle({ ...tracks[0], id: `${MOVIE}.${MEDIA_SOURCE}.2/../../evil` }, path.join(directory(t), 'bad.srt')), /Invalid Jellyfin subtitle/);
+  row = structuredClone(row); row.MediaSources[0].MediaStreams = [];
+  await assert.rejects(client.downloadSubtitle(tracks[0], path.join(directory(t), 'stale.srt')), /no longer available/);
+  assert.ok(requests.every(request => !request.url.includes('evil')));
 });
 
 test('Jellyfin rejects redirects, server error bodies and malformed or oversized JSON without leaking secrets', async t => {
@@ -168,6 +205,33 @@ test('Jellyfin streams exact original bytes with progress and does not overwrite
   assert.match(requests[0].headers.authorization, /Token="fixture-private-token"/);
   await assert.rejects(client.download(metadata, dest), /already exists/);
   assert.equal(fs.readFileSync(dest, 'utf8'), 'contents'); assert.equal(requests.length, 1);
+});
+
+test('Jellyfin preserves and resumes an original only with a validated strong ETag range', async t => {
+  const dest = path.join(directory(t), 'film.mkv');
+  const row = structuredClone(movie); row.MediaSources[0].Id = MEDIA_SOURCE;
+  const requests = [];
+  const { client } = await fixture(t, (req, res) => {
+    requests.push({ url: req.url, range: req.headers.range, ifRange: req.headers['if-range'] });
+    if (req.url === `/Users/${USER}/Items/${MOVIE}`) return json(res, row);
+    if (req.url !== `/Items/${MOVIE}/Download`) return json(res, {});
+    if (req.headers.range) {
+      res.writeHead(206, { 'Content-Length': 4, 'Content-Range': 'bytes 4-7/8', ETag: '"jellyfin-v1"' });
+      return res.end('ents');
+    }
+    res.writeHead(200, { 'Content-Length': 8, ETag: '"jellyfin-v1"' });
+    res.write('cont'); setImmediate(() => res.destroy());
+  });
+  const metadata = await client.metadata(MOVIE);
+  let state;
+  await assert.rejects(client.download(metadata, dest, { retainOnError: true, onCheckpoint: value => { if (value) state = value; } }), error => error.retryable === true);
+  assert.equal(fs.readFileSync(dest, 'utf8'), 'cont');
+  assert.deepEqual(state, { offset: 4, totalBytes: 8, etag: '"jellyfin-v1"' });
+  const result = await client.download(metadata, dest, { resumeState: state, onCheckpoint: () => {} });
+  assert.deepEqual(result, { sizeBytes: 8, resumedBytes: 4 });
+  assert.equal(fs.readFileSync(dest, 'utf8'), 'contents');
+  assert.equal(requests.at(-1).range, 'bytes=4-');
+  assert.equal(requests.at(-1).ifRange, '"jellyfin-v1"');
 });
 
 test('Jellyfin incomplete, excess, interrupted and cancelled streams remove partial files', async t => {

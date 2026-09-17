@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 export const qualityOptions = [['480p', 'Up to 480p'], ['720p', 'Up to 720p'], ['1080p', 'Up to 1080p'], ['best', 'Best available']];
-export const pendingStatuses = ['queued', 'preparing', 'downloading', 'processing', 'waiting-storage', 'waiting-network'];
+export const pendingStatuses = ['queued', 'preparing', 'downloading', 'processing', 'waiting-storage', 'waiting-network', 'paused'];
 export function formatBytes(bytes) {
   if (!Number.isFinite(bytes)) return 'Unavailable';
   if (bytes <= 0) return '0 B';
@@ -176,4 +176,47 @@ export function ConfirmDialog({
       </button>
     </div>
   </dialog>;
+}
+
+export function SubtitleOptions({ language, onLanguage, automatic = false, onAutomatic, disabled = false }) {
+  return <div className="subtitle-options">
+    <label className="form-field">Subtitles<select aria-label="Subtitle language" value={language || ''} disabled={disabled} onChange={event => onLanguage(event.target.value)}>
+      <option value="">Don’t download subtitles</option>
+      {[['en','English'],['fr','French'],['es','Spanish'],['de','German'],['it','Italian'],['pt','Portuguese'],['ja','Japanese'],['ko','Korean'],['zh','Chinese']].map(([value,label]) => <option key={value} value={value}>{label}</option>)}
+      {language && !['en','fr','es','de','it','pt','ja','ko','zh'].includes(language) && <option value={language}>{language}</option>}
+    </select></label>
+    {onAutomatic && <label className="inline-check"><input type="checkbox" checked={automatic} disabled={disabled || !language} onChange={event => onAutomatic(event.target.checked)} /> Allow automatic captions when needed</label>}
+  </div>;
+}
+
+export function batchSummary(result) {
+  const counts = result?.counts || {};
+  return [[counts.added,'added'],[counts.alreadyQueued,'already queued'],[counts.alreadySaved,'already saved'],[counts.rejected,'unavailable']].filter(([count]) => count).map(([count,label]) => `${count} ${label}`).join(' · ') || 'No downloads added.';
+}
+
+export function BatchSelection({ preview, selected, onSelected, busy, onAdd, onMore, onClose, label = 'videos' }) {
+  const items = preview?.items || [];
+  const selectable = items.filter(item => item.available !== false && !['alreadyQueued','alreadySaved','rejected'].includes(item.outcome));
+  const chosen = selectable.filter(item => selected.includes(item.id));
+  const bytes = chosen.reduce((sum,item) => sum + (item.expectedBytes || item.sizeBytes || 0),0);
+  const unknown = chosen.filter(item => !(item.expectedBytes || item.sizeBytes)).length;
+  const duration = chosen.reduce((sum,item) => sum + (item.duration || 0),0);
+  return <section className="batch-preview" aria-label={`Select ${label} to download`}>
+    <div className="section-heading"><h3>Choose {label}</h3>{onClose && <button type="button" className="text-button" disabled={busy} onClick={onClose}>Close preview</button>}</div>
+    {preview.warning && <p className="estimate-warning" role="status">{preview.warning}</p>}
+    <div className="batch-toolbar"><label className="inline-check"><input type="checkbox" disabled={busy || !selectable.length} checked={!!selectable.length && selectable.every(item => selected.includes(item.id))} onChange={event => onSelected(event.target.checked ? selectable.slice(0,500).map(item => item.id) : [])} /> Select available{selectable.length > 500 ? ' (up to 500)' : ''}</label><span>{items.length} shown{preview.total != null ? ` of ${preview.total}` : ''}</span></div>
+    <div className="batch-items">{items.map((item,index) => {
+      const unavailable = !selectable.includes(item);
+      return <label className={`batch-item ${unavailable ? 'unavailable' : ''}`} key={`${item.id}-${index}`}><input type="checkbox" disabled={busy || unavailable || selected.length >= 500 && !selected.includes(item.id)} checked={selected.includes(item.id)} onChange={event => onSelected(event.target.checked ? [...selected,item.id] : selected.filter(id => id !== item.id))} /><span><strong>{item.title || item.url || 'Unavailable video'}</strong><small>{[(item.episodeNumber ?? item.episode) != null ? `Episode ${item.episodeNumber ?? item.episode}` : '',item.duration ? formatDuration(item.duration) : '',item.expectedBytes || item.sizeBytes ? formatBytes(item.expectedBytes || item.sizeBytes) : 'Size unavailable',item.outcome === 'alreadyQueued' ? 'Already queued' : item.outcome === 'alreadySaved' ? 'Already saved' : item.reason].filter(Boolean).join(' · ')}</small>{item.subtitleTracks?.length > 0 && <small>Subtitles: {item.subtitleTracks.map(track => `${track.language}${['auto','automatic'].includes(track.origin) ? ' (automatic)' : ''}`).join(', ')}</small>}</span></label>;
+    })}</div>
+    {preview.hasMore && onMore && <button type="button" className="text-button" disabled={busy} onClick={onMore}>{busy ? 'Loading…' : 'Load more'}</button>}
+    <div className="batch-footer"><p>{chosen.length} selected{duration ? ` · ${formatDuration(duration)}` : ''}{bytes ? ` · About ${formatBytes(bytes)}` : ''}{unknown ? ` · ${unknown} size${unknown === 1 ? '' : 's'} unknown` : ''}<small>{chosen.length > 500 ? 'Choose up to 500 videos per batch.' : 'Final sizes may vary. Downloads wait when storage is full.'}</small></p><button type="button" className="primary-button" disabled={busy || !chosen.length || chosen.length > 500} onClick={onAdd}>{busy ? 'Working…' : `Add ${chosen.length || 'selected'} to queue`}</button></div>
+  </section>;
+}
+
+
+export function BatchResults({ results }) {
+  const skipped=(results || []).filter(result=>result.outcome !== 'added');
+  if(!skipped.length) return null;
+  return <details className="composer-options batch-results"><summary>Skipped and unavailable · {skipped.length}</summary><div className="batch-items">{skipped.map((result,index)=><div className="batch-item" key={index}><span><strong>{result.title || 'Video'}</strong><small>{result.reason || (result.outcome === 'alreadySaved' ? 'Already saved in your library.' : result.outcome === 'alreadyQueued' ? 'Already in your download queue.' : 'This video could not be added.')}</small></span></div>)}</div></details>;
 }

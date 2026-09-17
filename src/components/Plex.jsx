@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { EmptyState, ErrorMessage, Icon, formatBytes, formatDuration } from './shared';
+import { BatchSelection, BatchResults, batchSummary, EmptyState, ErrorMessage, Icon, SubtitleOptions, formatBytes, formatDuration } from './shared';
 
 function connectionError(error) {
   // Electron prepends IPC implementation details to rejected invoke messages.
@@ -13,16 +13,16 @@ const providers = {
   jellyfin: { name: 'Jellyfin', config: 'getJellyfinConfig', connect: 'connectJellyfin', disconnect: 'disconnectJellyfin', sections: 'jellyfinSections', browse: 'browseJellyfin', download: 'downloadJellyfin', localAccess: 'requestJellyfinLocalAccess', placeholder: 'http://192.168.1.20:8096' }
 };
 
-export function Servers({ onDownloads, provider = 'plex', onProviderChange }) {
+export function Servers({ onDownloads, provider = 'plex', onProviderChange, settings = {} }) {
   const providerControls = <div className="server-provider-switch" role="group" aria-label="Server type">
       {Object.entries(providers).map(([id, service]) => <button type="button" key={id} aria-pressed={provider === id} onClick={() => onProviderChange(id)}>{service.name}</button>)}
     </div>;
   return <section className="screen" aria-label={providers[provider].name}>
-    <ServerBrowser key={provider} provider={provider} onDownloads={onDownloads} providerControls={providerControls} />
+    <ServerBrowser key={provider} settings={settings} provider={provider} onDownloads={onDownloads} providerControls={providerControls} />
   </section>;
 }
 
-function ServerBrowser({ provider, onDownloads, providerControls }) {
+function ServerBrowser({ provider, onDownloads, providerControls, settings }) {
   const service = providers[provider];
   const isJellyfin = provider === 'jellyfin';
   const [config, setConfig] = useState(null);
@@ -42,13 +42,70 @@ function ServerBrowser({ provider, onDownloads, providerControls }) {
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const [batchResults,setBatchResults] = useState([]);
   const [reload, setReload] = useState(0);
   const [localAccess, setLocalAccess] = useState({ status: 'idle', url: '', message: '' });
   const [settingsError, setSettingsError] = useState('');
+  const [copyQuality,setCopyQuality] = useState('original');
+  const [subtitleLanguage,setSubtitleLanguage] = useState(settings.defaultSubtitleLanguage || '');
+  const [batch,setBatch] = useState(null);
+  const [batchSelected,setBatchSelected] = useState([]);
+  const [trackPreview,setTrackPreview] = useState(null);
+  const [selectedItems,setSelectedItems] = useState({});
+  const [batchFromSelection,setBatchFromSelection] = useState(false);
+  const batchGeneration = useRef(0);
+  const seasonRequest = useRef(null);
   const accessGeneration = useRef(0);
   const generation = useRef(0);
   const parentId = trail.at(-1)?.id;
   const api = window.offgrid;
+  const downloadOptions = {copyQuality,subtitleLanguages:subtitleLanguage ? [subtitleLanguage] : []};
+  useEffect(() => {setSelectedItems({});setBatchFromSelection(false);},[config,sectionId,parentId,search,editing]);
+  useEffect(() => {
+    batchGeneration.current++;setBatch(null);setBatchSelected([]);setTrackPreview(null);
+    const pending=seasonRequest.current;seasonRequest.current=null;
+    if(pending){api.cancelPreview(pending).catch(()=>{});setBusy('');}
+  },[config,sectionId,parentId,start,search,editing]);
+  useEffect(() => () => {batchGeneration.current++;if(seasonRequest.current)api.cancelPreview(seasonRequest.current).catch(()=>{});},[]);
+  function cancelSeasonPreview() {
+    const requestId=seasonRequest.current;seasonRequest.current=null;batchGeneration.current++;setBusy('');
+    if(requestId)api.cancelPreview(requestId).catch(()=>{});
+  }
+  async function previewSeason(item) {
+    const current = ++batchGeneration.current;
+    const requestId=crypto.randomUUID();seasonRequest.current=requestId;
+    setBusy('season');setError('');setNotice('');setBatch(null);setBatchSelected([]);setBatchFromSelection(false);
+    try {const value = await api.previewServerSeason(provider,item.id,requestId);if(current === batchGeneration.current) setBatch({...value,title:item.title});}
+    catch(error){if(current === batchGeneration.current) setError(connectionError(error));}
+    finally{if(seasonRequest.current===requestId){seasonRequest.current=null;setBusy('');}}
+  }
+  async function addSelected() {
+    setBusy('batch');setError('');
+    try {
+      const result = await api.downloadServerBatch(provider,{ids:batchSelected,...downloadOptions});
+      setNotice(batchSummary(result));setBatchResults(result.results);setBatchSelected([]);
+      if(batchFromSelection) setSelectedItems(current => {
+        const next={...current};result.results.forEach((outcome,index) => {if(['added','alreadySaved','alreadyQueued'].includes(outcome.outcome)) delete next[batchSelected[index]];});return next;
+      });
+      setBatch(current => ({...current,items:current.items.map(item => {
+        const index = batchSelected.indexOf(item.id);const outcome = index >= 0 ? result.results[index] : null;
+        return outcome ? {...item,outcome:outcome.outcome === 'added' ? 'alreadyQueued' : outcome.outcome,reason:outcome.reason} : item;
+      })}));
+    }catch(error){setError(connectionError(error));}finally{setBusy('');}
+  }
+  function selectItem(item,checked) {
+    setSelectedItems(current => {const next={...current};if(checked && Object.keys(next).length<500)next[item.id]=item;else if(!checked)delete next[item.id];return next;});
+  }
+  function reviewSelected() {
+    const items=Object.values(selectedItems).map(item=>({...item,available:true,expectedBytes:item.sizeBytes}));
+    setBatch({items,total:items.length,complete:true,hasMore:false});setBatchSelected(items.map(item=>item.id));setBatchFromSelection(true);setNotice('');
+  }
+  const pageSelectable=page.items.filter(item=>item.downloadable && !['show','season'].includes(item.type));
+  async function showTracks(item) {
+    setBusy(item.id);setError('');
+    try {setTrackPreview({id:item.id,title:item.title,tracks:await api.serverSubtitleTracks(provider,item.id)});}
+    catch(error){setError(connectionError(error));}finally{setBusy('');}
+  }
   const isMac = config?.platform === 'darwin';
   const accessStatus = localAccess.url === baseUrl.trim() ? localAccess.status : 'idle';
 
@@ -169,7 +226,7 @@ function ServerBrowser({ provider, onDownloads, providerControls }) {
   async function download(item) {
     setBusy(item.id); setError(''); setNotice('');
     try {
-      const result = await api[service.download](item.id);
+      const result = await api[service.download](item.id,downloadOptions);
       setNotice(result.alreadySaved ? `“${item.title}” is already saved in your library.` : result.accepted ? `“${item.title}” added to downloads.` : `“${item.title}” is already in the queue.`);
     } catch (error) { recordConnectionError(error, config.baseUrl); }
     finally { setBusy(''); }
@@ -194,7 +251,7 @@ function ServerBrowser({ provider, onDownloads, providerControls }) {
     <ErrorMessage>{error}</ErrorMessage>
     {config === null ? <p className="loading-message" role="status">{loading ? `Checking your ${service.name} connection…` : `Your ${service.name} connection could not be loaded.`}</p> : !config.configured || editing ? <section className="download-composer plex-connect">
       <h2>{config.configured ? 'Change connection' : `Connect your ${service.name} server`}</h2>
-      <p className="section-note">Use the local address of your server. Offgrid downloads the original files; playback opens in mpv.</p>
+      <p className="section-note">Use the local address of your server. Choose original files or a smaller offline copy; playback opens in mpv.</p>
       <form onSubmit={connect} autoComplete="off">
         <label className="form-field">Server address<input type="url" value={baseUrl} onChange={event => changeServerAddress(event.target.value)} placeholder={service.placeholder} required spellCheck="false" autoCapitalize="none" /></label>
         {accessPanel}
@@ -220,14 +277,32 @@ function ServerBrowser({ provider, onDownloads, providerControls }) {
         {!parentId && <form className="plex-search" onSubmit={event => { event.preventDefault(); setSearch(query.trim()); setStart(0); }}><label className="search-field"><Icon name="search" size={16} /><input aria-label={`Search ${service.name} library`} placeholder="Search this library" value={query} onChange={event => setQuery(event.target.value)} /></label><button className="text-button" type="submit">Search</button></form>}
         <button className="text-button" disabled={loading} onClick={() => setReload(value => value + 1)}>Refresh</button>
       </div>
+      {(pageSelectable.length > 0 || Object.keys(selectedItems).length > 0) && <div className="batch-toolbar server-selection" aria-label="Server selection">
+        <label className="inline-check"><input type="checkbox" disabled={loading || !!busy || !pageSelectable.length} checked={!!pageSelectable.length && pageSelectable.every(item=>selectedItems[item.id])} onChange={event => {const checked=event.target.checked;setSelectedItems(current=>{const next={...current};for(const item of pageSelectable){if(checked && Object.keys(next).length<500)next[item.id]=item;else if(!checked)delete next[item.id];}return next;});}}/> Select this page</label>
+        <span>{Object.keys(selectedItems).length} selected across pages · 500 maximum</span>
+        <button className="secondary-button compact" disabled={!!busy || !Object.keys(selectedItems).length} onClick={reviewSelected}>Review {Object.keys(selectedItems).length} selected</button>
+        {Object.keys(selectedItems).length > 0 && <button className="text-button" disabled={!!busy} onClick={()=>{setSelectedItems({});if(batchFromSelection){setBatch(null);setBatchSelected([]);}}}>Clear selection</button>}
+      </div>}
       {parentId && <div className="section-heading"><button className="text-button" onClick={() => { setTrail(current => current.slice(0, -1)); setStart(0); }}><Icon name="back" size={16} /> Back to {trail.length > 1 ? trail.at(-2).title : sections.find(section => section.id === sectionId)?.title || 'library'}</button><span>{trail.at(-1).title}</span></div>}
+      <details className="server-download-options"><summary>Download options · {copyQuality === '720p' ? 'Smaller copy' : 'Original quality'}{subtitleLanguage ? ` · ${subtitleLanguage} subtitles` : ''}</summary>
+        <div className="subtitle-options"><label className="form-field">Saved copy<select aria-label="Server download quality" value={copyQuality} disabled={!!busy} onChange={event => setCopyQuality(event.target.value)}><option value="original">Keep original</option><option value="720p">Smaller copy · Up to 720p</option></select></label><SubtitleOptions language={subtitleLanguage} onLanguage={setSubtitleLanguage} disabled={!!busy}/></div>
+        <p className="section-note">{copyQuality === '720p' ? 'Offgrid downloads the original, then makes a smaller copy on this Mac. Allow space for both files during conversion. Processing takes extra time.' : 'Original files preserve the server’s quality and embedded subtitle tracks.'} Available external text subtitles can be saved separately.</p>
+      </details>
+      {trail.at(-1)?.type === 'season' && <button className="secondary-button compact" disabled={!!busy || loading} onClick={() => previewSeason(trail.at(-1))}>{busy === 'season' ? 'Reading season…' : 'Download season…'}</button>}
+      {trackPreview && <div className="estimate-preview"><div><strong>Subtitles for {trackPreview.title}</strong><p>{trackPreview.tracks.length ? trackPreview.tracks.map(track => `${track.language || 'Unknown language'} (${track.format})`).join(' · ') : 'No downloadable external text subtitles. Embedded tracks stay in the original file.'}</p></div><button className="text-button" onClick={() => setTrackPreview(null)}>Close</button></div>}
+      {busy === 'season' && <p className="section-note" role="status">Reading the season… <button className="text-button" onClick={cancelSeasonPreview}>Cancel preview</button></p>}
+      {batch && <BatchSelection preview={batch} selected={batchSelected} onSelected={setBatchSelected} busy={!!busy} onAdd={addSelected} onClose={() => setBatch(null)} label={batchFromSelection ? 'videos' : 'episodes'}/>}
+      <BatchResults results={batchResults}/>
       {notice && <p className="success-message" role="status"><Icon name="check" size={14} />{notice}</p>}
       {loading ? <p className="loading-message" role="status">Loading your {service.name} library…</p> : !page.items.length ? <EmptyState icon="library" title={error ? 'Server unavailable' : search ? 'No matches in this library' : 'No media to browse'}>{error ? 'Make sure your server is running on this network, then refresh.' : search ? 'Try another title or clear your search.' : 'Movie and TV libraries on your connected server appear here.'}</EmptyState> : <>
         <div className="plex-media-list">
           {page.items.map(item => <article className="plex-media-row" key={item.id}>
+            {!['show','season'].includes(item.type) && <input type="checkbox" aria-label={`Select ${item.title}`} disabled={!!busy || !item.downloadable || !selectedItems[item.id] && Object.keys(selectedItems).length>=500} checked={!!selectedItems[item.id]} onChange={event=>selectItem(item,event.target.checked)}/>}
             <span className="job-glyph"><Icon name={['show', 'season'].includes(item.type) ? 'folder' : 'play'} size={18} /></span>
             <div className="plex-media-details"><h3>{item.title}</h3><p>{[item.subtitle, item.duration ? formatDuration(item.duration) : '', item.sizeBytes ? formatBytes(item.sizeBytes) : '', item.downloadable ? 'Original quality' : ''].filter(Boolean).join(' · ')}</p></div>
-            {['show', 'season'].includes(item.type) ? <button className="secondary-button compact" onClick={() => { setTrail(current => [...current, { id: item.id, title: item.title }]); setStart(0); setNotice(''); }}>Browse {item.type === 'show' ? 'seasons' : 'episodes'}</button> : item.downloadable ? <button className="secondary-button compact" disabled={!!busy} onClick={() => download(item)}><Icon name="download" size={13} />{busy === item.id ? 'Adding…' : 'Download'}</button> : <span className="section-note">Unavailable</span>}
+            {item.type === 'season' && <button className="text-button" disabled={!!busy} onClick={() => previewSeason(item)}>Download season…</button>}
+            {item.downloadable && <button className="text-button" disabled={!!busy} onClick={() => showTracks(item)}>Subtitles</button>}
+            {['show', 'season'].includes(item.type) ? <button className="secondary-button compact" onClick={() => { setTrail(current => [...current, { id: item.id, title: item.title, type:item.type }]); setStart(0); setNotice(''); }}>Browse {item.type === 'show' ? 'seasons' : 'episodes'}</button> : item.downloadable ? <button className="secondary-button compact" disabled={!!busy} onClick={() => download(item)}><Icon name="download" size={13} />{busy === item.id ? 'Adding…' : 'Download'}</button> : <span className="section-note">Unavailable</span>}
           </article>)}
         </div>
         <div className="plex-pagination"><span>{start + 1}–{start + page.items.length} of {page.total}</span><div className="plex-actions"><button className="text-button" disabled={start === 0 || loading} onClick={() => setStart(value => Math.max(0, value - 100))}>Previous</button><button className="text-button" disabled={start + page.items.length >= page.total || loading} onClick={() => setStart(value => value + 100)}>Next</button></div></div>

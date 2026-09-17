@@ -7,17 +7,17 @@ const https = require('node:https');
 const dns = require('node:dns').promises;
 const net = require('node:net');
 const fs = require('node:fs');
-const { pipeline } = require('node:stream/promises');
-const { Transform } = require('node:stream');
+const { rangeTransfer, RangeTransferError } = require('./range-transfer.cjs');
 
 const PAGE_SIZE = 100;
 const METADATA_LIMIT = 4 * 1024 * 1024;
 const REQUEST_TIMEOUT = 15_000;
 const DOWNLOAD_IDLE_TIMEOUT = 30_000;
+const SUBTITLE_LIMIT = 5 * 1024 * 1024;
 const EXTENSIONS = new Set(['mp4', 'mkv', 'avi', 'mov', 'webm', 'm4v', 'mpg', 'mpeg', 'ts', 'm2ts', 'wmv', 'flv', 'vob', 'ogv', '3gp']);
 
 class JellyfinError extends Error {
-  constructor(message, code = 'JELLYFIN_ERROR') { super(message); this.name = 'JellyfinError'; this.code = code; }
+  constructor(message, code = 'JELLYFIN_ERROR', { retryable = false } = {}) { super(message); this.name = 'JellyfinError'; this.code = code; this.retryable = retryable; }
 }
 function cancelled() { return new JellyfinError('Jellyfin download cancelled.', 'ABORT_ERR'); }
 const NETWORK_ERROR_TYPES = new Map([
@@ -46,9 +46,22 @@ function networkError(error, { platform = process.platform, fallback = 'Could no
     interrupted: 'The Jellyfin connection was interrupted. Check the network connection and retry.',
     tls: 'Could not establish a secure connection to Jellyfin. Check the HTTPS address and the server certificate; certificate verification must succeed.'
   };
-  return type ? new JellyfinError(`${messages[type]} (${code})`, code) : new JellyfinError(fallback);
+  return type ? new JellyfinError(`${messages[type]} (${code})`, code, { retryable: ['EHOSTUNREACH', 'ENETUNREACH', 'ECONNREFUSED', 'EAI_AGAIN', 'ETIMEDOUT', 'ECONNRESET', 'ECONNABORTED', 'EPIPE', 'ERR_STREAM_PREMATURE_CLOSE'].includes(code) }) : new JellyfinError(fallback);
+}
+function transientStatus(status) { return status === 408 || status === 429 || status >= 500; }
+function providerStatusError(status) {
+  const code = `HTTP_${status}`;
+  const message = status === 401 || status === 403 ? 'Jellyfin authentication failed or access was denied. Check your login and account download permissions.'
+    : status >= 300 && status < 400 ? 'Jellyfin redirects are not supported. Use the local server address.'
+      : 'Jellyfin could not provide the requested media.';
+  return new JellyfinError(message, code, { retryable: transientStatus(status) });
 }
 function positiveSize(value) { const n = Number(value); return Number.isSafeInteger(n) && n > 0 ? n : null; }
+function nonNegativeInteger(value) {
+  if (!(typeof value === 'number' && Number.isFinite(value)) && !(typeof value === 'string' && /^\d+$/.test(value))) return null;
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number >= 0 ? number : null;
+}
 function cleanText(value, fallback = '') { return typeof value === 'string' ? value.replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 500) : fallback; }
 function validateId(value) {
   const id = String(value ?? '');
@@ -75,7 +88,8 @@ function mediaFile(row) {
   if (typeof row.Path !== 'string' || !row.Path || source.Path !== row.Path) return null;
   const extension = String(source.Container || row.Container || '').toLowerCase();
   const sizeBytes = positiveSize(source.Size);
-  return sizeBytes && EXTENSIONS.has(extension) ? { extension, sizeBytes } : null;
+  const mediaSourceId = source.Id === undefined ? null : validateId(source.Id);
+  return sizeBytes && EXTENSIONS.has(extension) ? { extension, sizeBytes, mediaSourceId } : null;
 }
 function normalizeItem(row) {
   if (!row || typeof row !== 'object') return null;
@@ -88,9 +102,34 @@ function normalizeItem(row) {
   const subtitle = type === 'movie' ? (row.ProductionYear ? String(row.ProductionYear).slice(0, 4) : '')
     : type === 'episode' ? `${channel} · S${Number(row.ParentIndexNumber) || 0} E${Number(row.IndexNumber) || 0}`
       : type === 'season' ? channel : '';
-  return { id, type, title: cleanText(row.Name, 'Untitled'), subtitle, channel,
+  const seasonNumber = type === 'episode' ? nonNegativeInteger(row.ParentIndexNumber) : null;
+  const episodeNumber = type === 'episode' ? nonNegativeInteger(row.IndexNumber) : null;
+  return { id, type, title: cleanText(row.Name, 'Untitled'), subtitle, channel, seasonNumber, episodeNumber,
     duration: Number.isFinite(duration) && duration >= 0 ? Math.floor(duration / 10_000_000) : 0,
     sizeBytes: file?.sizeBytes || null, downloadable: ['movie', 'episode'].includes(type) && row.CanDownload === true && Boolean(file) };
+}
+function subtitleFormat(stream) {
+  const codec = String(stream?.Codec || '').toLowerCase();
+  if (codec === 'srt' || codec === 'subrip') return 'srt';
+  if (codec === 'vtt' || codec === 'webvtt') return 'vtt';
+  return null;
+}
+function externalSubtitleTracks(row, itemId) {
+  const sources = Array.isArray(row?.MediaSources) ? row.MediaSources : [];
+  if (sources.length !== 1) return [];
+  const source = sources[0];
+  if (!source || typeof source !== 'object' || source.Protocol !== 'File' || source.IsRemote || source.IsInfiniteStream || source.RequiresOpening || source.RequiresClosing) return [];
+  let mediaSourceId;
+  try { mediaSourceId = validateId(source.Id); } catch { return []; }
+  const streams = Array.isArray(source.MediaStreams) ? source.MediaStreams : (Array.isArray(row.MediaStreams) ? row.MediaStreams : []);
+  return streams.filter(stream => stream?.Type === 'Subtitle' && stream.IsExternal === true && stream.IsExternalUrl !== true)
+    .map(stream => {
+      const index = Number(stream.Index);
+      const format = subtitleFormat(stream);
+      if (!Number.isSafeInteger(index) || index < 0 || index > 9999 || !format) return null;
+      const language = cleanText(stream.Language || stream.LanguageCode, 'und').slice(0, 32) || 'und';
+      return { id: `${itemId}.${mediaSourceId}.${index}`, language, format, origin: 'external' };
+    }).filter(Boolean).slice(0, 100);
 }
 
 class JellyfinClient {
@@ -127,7 +166,7 @@ class JellyfinClient {
       const results = await Promise.race([
         dns.lookup(hostname, { all: true, verbatim: true }),
         new Promise((_, reject) => {
-          timer = setTimeout(() => reject(new JellyfinError('Jellyfin server lookup timed out.')), REQUEST_TIMEOUT);
+          timer = setTimeout(() => reject(new JellyfinError('Jellyfin server lookup timed out.', 'ETIMEDOUT', { retryable: true })), REQUEST_TIMEOUT);
           abort = () => reject(cancelled());
           signal?.addEventListener('abort', abort, { once: true });
         })
@@ -140,7 +179,11 @@ class JellyfinClient {
     } finally { clearTimeout(timer); if (abort) signal?.removeEventListener('abort', abort); }
   }
 
-  async _request(path, { signal, download = false, method = 'GET', body } = {}) {
+  async _request(path, { signal, download = false, method = 'GET', body, headers = {}, allowRangeResponses = false } = {}) {
+    if (allowRangeResponses) {
+      if (!download || typeof path !== 'string' || !/^\/Items\/[a-f0-9]{32}\/Download$/i.test(path)) throw new JellyfinError('Range responses are restricted to original media downloads.');
+      validateId(path.split('/')[2]);
+    }
     if (path !== '/Users/AuthenticateByName') this._requireUser();
     const address = await this._resolve(signal);
     if (signal?.aborted) throw cancelled();
@@ -155,24 +198,21 @@ class JellyfinClient {
         path: url.pathname.replace(/\/$/, '') + path, method, agent: false,
         // Pin the verified answer to this connection, including DNS names that rebind.
         lookup: (_hostname, options, callback) => callback(null, options.all ? [address] : address.address, address.family),
-        headers: { Accept: download ? 'application/octet-stream' : 'application/json', 'Accept-Encoding': 'identity',
+        headers: { ...headers, Accept: download ? 'application/octet-stream' : 'application/json', 'Accept-Encoding': 'identity',
           Authorization: `MediaBrowser Client="Offgrid", Device="Offgrid", DeviceId="${this.deviceId}", Version="1.0"${this.#token ? `, Token="${this.#token}"` : ''}`,
           ...(payload === undefined ? {} : { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) }) }
       }, response => {
         response.on('error', () => {});
-        if (response.statusCode !== 200) {
+        if (response.statusCode !== 200 && !(allowRangeResponses && [206, 416].includes(response.statusCode))) {
           response.destroy();
-          const message = response.statusCode === 401 || response.statusCode === 403 ? 'Jellyfin authentication failed or access was denied. Check your login and account download permissions.'
-            : response.statusCode >= 300 && response.statusCode < 400 ? 'Jellyfin redirects are not supported. Use the local server address.'
-              : 'Jellyfin could not provide the requested media.';
-          reject(new JellyfinError(message));
+          reject(providerStatusError(response.statusCode));
         } else if (response.headers['content-encoding'] && response.headers['content-encoding'] !== 'identity') {
           response.destroy(); reject(new JellyfinError('Jellyfin returned an unsupported encoded response.'));
         } else resolve(response);
       });
       request.on('error', error => reject(networkError(error)));
-      request.setTimeout(download ? DOWNLOAD_IDLE_TIMEOUT : REQUEST_TIMEOUT, () => request.destroy(new JellyfinError('Jellyfin connection timed out.')));
-      if (!download) deadline = setTimeout(() => request.destroy(new JellyfinError('Jellyfin request timed out.')), REQUEST_TIMEOUT);
+      request.setTimeout(download ? DOWNLOAD_IDLE_TIMEOUT : REQUEST_TIMEOUT, () => request.destroy(new JellyfinError('Jellyfin connection timed out.', 'ETIMEDOUT', { retryable: true })));
+      if (!download) deadline = setTimeout(() => request.destroy(new JellyfinError('Jellyfin request timed out.', 'ETIMEDOUT', { retryable: true })), REQUEST_TIMEOUT);
       request.on('close', () => { clearTimeout(deadline); signal?.removeEventListener('abort', abort); });
       signal?.addEventListener('abort', abort, { once: true });
       request.end(payload);
@@ -233,41 +273,70 @@ class JellyfinClient {
     if (row.MediaSources?.length > 1 || Number(row.PartCount || 1) !== 1) throw new JellyfinError('Multiple-version and multi-part Jellyfin media is not supported yet.');
     const file = mediaFile(row);
     if (!file) throw new JellyfinError('The original Jellyfin media file is unavailable or uses an unsupported format.');
-    return { ...item, ...file, downloadId: id };
+    return { ...item, ...file, downloadId: id, subtitleTracks: externalSubtitleTracks(row, id) };
   }
 
-  async download(metadata, destination, { signal, onProgress } = {}) {
+  async subtitleTracks(id, { signal } = {}) {
+    return (await this.metadata(id, { signal })).subtitleTracks;
+  }
+
+  async download(metadata, destination, { signal, onProgress, resumeState, onCheckpoint, retainOnError = false } = {}) {
     const downloadId = validateId(metadata?.downloadId);
     const expected = positiveSize(metadata?.sizeBytes);
     if (!expected) throw new JellyfinError('Jellyfin did not provide the original file size.');
     if (signal?.aborted) throw cancelled();
-    let file, response, responseError, downloadedBytes = 0;
+    const revalidate = async () => {
+      if (!metadata?.id) return false;
+      const fresh = await this.metadata(metadata.id, { signal });
+      return fresh.downloadId === downloadId && fresh.sizeBytes === expected && fresh.extension === metadata.extension
+        && fresh.mediaSourceId === (metadata.mediaSourceId ?? null);
+    };
     try {
-      // Create exclusively so a failed transfer never removes an existing file.
-      file = await fs.promises.open(destination, 'wx', 0o600);
-      response = await this._request(`/Items/${downloadId}/Download`, { signal, download: true });
-      response.on('error', error => { responseError = error; });
-      const contentLength = response.headers['content-length'];
-      if (contentLength !== undefined && positiveSize(contentLength) !== expected) throw new JellyfinError('Jellyfin file size changed. Refresh the library and try again.');
-      const progress = new Transform({ transform(chunk, _encoding, callback) {
-        downloadedBytes += chunk.length;
-        if (downloadedBytes > expected) return callback(new JellyfinError('Jellyfin sent more data than the original file size.'));
-        try { onProgress?.({ downloadedBytes, totalBytes: expected, progress: Math.min(100, downloadedBytes / expected * 100) }); }
-        catch { return callback(new JellyfinError('Jellyfin download progress could not be recorded.')); }
-        callback(null, chunk);
-      } });
-      await pipeline(response, progress, file.createWriteStream(), { signal });
-      if (downloadedBytes !== expected) throw new JellyfinError('Jellyfin download was incomplete. Please retry.');
-      return { sizeBytes: downloadedBytes };
+      return await rangeTransfer({
+        request: headers => this._request(`/Items/${downloadId}/Download`, { signal, download: true, headers, allowRangeResponses: true }),
+        destination, totalBytes: expected, signal, onProgress, resumeState, onCheckpoint, retainOnError,
+        revalidate: resumeState === undefined ? undefined : revalidate, errorPrefix: 'Jellyfin',
+        isProviderError: error => error instanceof JellyfinError,
+        mapError: error => networkError(error, { fallback: 'Jellyfin download failed or was interrupted. Please retry.' })
+      });
     } catch (error) {
-      response?.destroy();
-      if (file) { await file.close().catch(() => {}); await fs.promises.unlink(destination).catch(() => {}); }
       if (signal?.aborted || error.code === 'ABORT_ERR') throw cancelled();
+      if (error instanceof RangeTransferError) throw new JellyfinError(error.message, error.code, { retryable: error.retryable });
       if (error instanceof JellyfinError) throw error;
-      if (error.code === 'EEXIST') throw new JellyfinError('A file already exists at this download destination.');
-      if (responseError) throw networkError(responseError, { fallback: 'Jellyfin download failed or was interrupted. Please retry.' });
-      throw new JellyfinError('Jellyfin download failed or was interrupted. Please retry.');
-    } finally { if (file) await file.close().catch(() => {}); }
+      throw new JellyfinError('Jellyfin download failed or was interrupted. Please retry.', error?.code || 'JELLYFIN_ERROR', { retryable: error?.retryable === true });
+    }
+  }
+
+  async downloadSubtitle(track, destination, { signal } = {}) {
+    const id = String(track?.id ?? '');
+    const format = String(track?.format ?? '').toLowerCase();
+    if (!/^[a-f0-9]{32}\.[a-f0-9]{32}\.\d{1,4}$/i.test(id) || !['vtt', 'srt'].includes(format)) throw new JellyfinError('Invalid Jellyfin subtitle selection.');
+    const [itemId, mediaSourceId, indexText] = id.split('.');
+    const index = Number(indexText);
+    const metadata = await this.metadata(itemId, { signal });
+    if (!metadata.subtitleTracks.some(candidate => candidate.id === `${itemId}.${mediaSourceId}.${index}` && candidate.format === format)) throw new JellyfinError('The selected Jellyfin subtitle is no longer available.');
+    const response = await this._request(`/Videos/${itemId}/${mediaSourceId}/Subtitles/${index}/Stream.${format}`, { signal, download: true });
+    try {
+      const type = String(response.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+      if (type && !['text/vtt', 'text/plain', 'application/x-subrip', 'application/octet-stream'].includes(type)) throw new JellyfinError('Jellyfin returned an unsupported subtitle format.');
+      const length = response.headers['content-length'];
+      if (length !== undefined && (!/^\d+$/.test(String(length)) || Number(length) > SUBTITLE_LIMIT)) throw new JellyfinError('Jellyfin subtitle is too large.');
+      const chunks = []; let sizeBytes = 0;
+      for await (const chunk of response) {
+        if (signal?.aborted) throw cancelled();
+        sizeBytes += chunk.length;
+        if (sizeBytes > SUBTITLE_LIMIT) throw new JellyfinError('Jellyfin subtitle is too large.');
+        chunks.push(chunk);
+      }
+      const contents = Buffer.concat(chunks);
+      if (!sizeBytes) throw new JellyfinError('Jellyfin returned an empty subtitle.');
+      if (length !== undefined && sizeBytes !== Number(length)) throw new JellyfinError('Jellyfin subtitle download was incomplete.');
+      const text = contents.toString('utf8');
+      if (text.includes('\u0000') || text.includes('\ufffd')) throw new JellyfinError('Jellyfin returned invalid subtitle text.');
+      if (signal?.aborted) throw cancelled();
+      await fs.promises.writeFile(destination, contents, { flag: 'wx', mode: 0o600 });
+      return { sizeBytes, format };
+    } catch (error) { response.destroy(); if (signal?.aborted) throw cancelled(); if (error instanceof JellyfinError) throw error; throw networkError(error, { fallback: 'Jellyfin subtitle download failed. Please retry.' }); }
   }
 }
 

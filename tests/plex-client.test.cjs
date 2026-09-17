@@ -104,6 +104,14 @@ test('browse uses bounded pagination, supports children and encodes title search
   await assert.rejects(client.browse({ sectionId: '1', start: -1 }), /Invalid Plex browsing/);
 });
 
+test('episode normalization exposes numeric season and episode numbers', async t => {
+  const episode = { ...movie, ratingKey: '45', type: 'episode', parentIndex: '3', index: '7' };
+  const { client } = await fixture(t, (_req, res) => json(res, { Metadata: [episode] }));
+  const result = await client.browse({ sectionId: '1' });
+  assert.equal(result.items[0].seasonNumber, 3);
+  assert.equal(result.items[0].episodeNumber, 7);
+});
+
 test('metadata chooses first media version and rejects multipart originals and unsafe paths', async t => {
   let row = structuredClone(movie);
   row.Media.push({ container: 'mp4', Part: [{ key: '/library/parts/999/456/file.mp4', size: 4 }] });
@@ -114,6 +122,30 @@ test('metadata chooses first media version and rejects multipart originals and u
   row = structuredClone(movie); row.Media[0].Part[0].key = 'http://public.example/file';
   await assert.rejects(client.metadata('42'), /unsupported media file path/);
   for (const key of ['/library/parts/1/2/..', '/library/parts/1/2/%2e%2e', '/library/parts/1/2/a%2fb.mkv', '/library/parts/1/2/%252f.mkv', '/library/parts/1/2/file.mkv?X-Plex-Token=x', '//evil/file', '/library/parts/1/2/../file.mkv']) assert.throws(() => validatePartKey(key));
+});
+
+test('Plex exposes only external VTT/SRT subtitle IDs and revalidates before download', async t => {
+  const row = structuredClone(movie);
+  row.Media[0].Part[0].Stream = [
+    { id: 7, streamType: 3, external: true, codec: 'srt', languageCode: 'en' },
+    { id: 8, streamType: 3, external: false, codec: 'vtt', languageCode: 'fr' },
+    { id: 9, streamType: 3, external: true, codec: 'ass', languageCode: 'en' }
+  ];
+  let available = true;
+  const { client, requests } = await fixture(t, (req, res) => {
+    if (req.url === '/library/streams/7.srt') { res.writeHead(200, { 'Content-Type': 'text/plain', 'Content-Length': 27 }); return res.end('1\n00:00:00 --> 00:00:01\nHi\n'); }
+    json(res, { Metadata: [available ? row : { ...row, Media: [{ ...row.Media[0], Part: [{ ...row.Media[0].Part[0], Stream: [] }] }] }] });
+  });
+  const tracks = await client.subtitleTracks('42');
+  assert.deepEqual(tracks, [{ id: '42.7', language: 'en', format: 'srt', origin: 'external' }]);
+  const dest = destination(t);
+  assert.deepEqual(await client.downloadSubtitle(tracks[0], dest), { sizeBytes: 27, format: 'srt' });
+  assert.equal(fs.readFileSync(dest, 'utf8'), '1\n00:00:00 --> 00:00:01\nHi\n');
+  assert.equal(requests.at(-1).url, '/library/streams/7.srt');
+  await assert.rejects(client.downloadSubtitle({ ...tracks[0], id: '42.7/../evil' }, destination(t)), /Invalid Plex subtitle/);
+  available = false;
+  await assert.rejects(client.downloadSubtitle(tracks[0], destination(t)), /no longer available/);
+  assert.ok(requests.every(request => !request.url.includes('evil')));
 });
 
 test('redirects and authentication errors are fixed safe messages and never follow redirects', async t => {
@@ -168,6 +200,31 @@ test('original download streams to disk, reports byte progress, and refuses over
   await assert.rejects(client.download(metadata, dest), /already exists/);
   assert.equal(fs.readFileSync(dest, 'utf8'), 'contents');
   assert.equal(requests.length, 1);
+});
+
+test('Plex preserves and resumes an original only with a validated strong ETag range', async t => {
+  const dest = destination(t);
+  const requests = [];
+  const { client } = await fixture(t, (req, res) => {
+    requests.push({ url: req.url, range: req.headers.range, ifRange: req.headers['if-range'] });
+    if (req.url === '/library/metadata/42') return json(res, { Metadata: [movie] });
+    if (req.headers.range) {
+      res.writeHead(206, { 'Content-Length': 4, 'Content-Range': 'bytes 4-7/8', ETag: '"plex-v1"' });
+      return res.end('ents');
+    }
+    res.writeHead(200, { 'Content-Length': 8, ETag: '"plex-v1"' });
+    res.write('cont'); setImmediate(() => res.destroy());
+  });
+  const metadata = await client.metadata('42');
+  let state;
+  await assert.rejects(client.download(metadata, dest, { retainOnError: true, onCheckpoint: value => { if (value) state = value; } }), error => error.retryable === true);
+  assert.equal(fs.readFileSync(dest, 'utf8'), 'cont');
+  assert.deepEqual(state, { offset: 4, totalBytes: 8, etag: '"plex-v1"' });
+  const result = await client.download(metadata, dest, { resumeState: state, onCheckpoint: () => {} });
+  assert.deepEqual(result, { sizeBytes: 8, resumedBytes: 4 });
+  assert.equal(fs.readFileSync(dest, 'utf8'), 'contents');
+  assert.equal(requests.at(-1).range, 'bytes=4-');
+  assert.equal(requests.at(-1).ifRange, '"plex-v1"');
 });
 
 test('mismatched sizes and short/oversized chunked streams remove incomplete files', async t => {

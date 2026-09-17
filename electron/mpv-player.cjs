@@ -204,6 +204,16 @@ function createMpvPlayer(options = {}) {
       if (!(await fileSystem.promises.stat(filePath)).isFile()) throw new Error('Not a file');
     } catch { throw new Error('The downloaded media file is missing or unreadable.'); }
     if (request !== generation) throw new Error('Playback request was canceled.');
+    const subtitleArgs=[];
+    for(const asset of video.assets || []) {
+      if(asset.kind!=='subtitle' || asset.format!=='vtt' || !/^[a-f0-9-]{36}$/.test(asset.id || '') || typeof asset.filePath!=='string' || !path.isAbsolute(asset.filePath) || path.basename(asset.filePath)!==`${video.id}.${asset.id}.vtt`) continue;
+      try {
+        const stat=await fileSystem.promises.lstat(asset.filePath);
+        if(stat.isFile() && !stat.isSymbolicLink() && stat.size<=5*1024*1024) subtitleArgs.push(`--sub-file=${asset.filePath}`);
+      } catch {}
+      if(request!==generation) throw new Error('Playback request was canceled.');
+    }
+    if (request !== generation) throw new Error('Playback request was canceled.');
     await terminate(active);
     if (request !== generation) throw new Error('Playback request was canceled.');
     const position = !video.watched && Number.isFinite(video.playbackPositionSeconds) && video.playbackPositionSeconds > 0 ? video.playbackPositionSeconds : 0;
@@ -218,7 +228,7 @@ function createMpvPlayer(options = {}) {
     emit(session, {});
     const title = String(video.title || 'Offgrid').replace(/[\r\n\0]/g, ' ').slice(0, 200);
     const pipe = `\\\\.\\pipe\\offgrid-${randomUUID()}`;
-    const args = ['--no-config', '--load-scripts=no', '--ytdl=no', '--access-references=no', '--resume-playback=no', '--save-position-on-quit=no',
+    const args = ['--no-config', '--load-scripts=no', '--ytdl=no', '--access-references=no', '--resume-playback=no', '--save-position-on-quit=no','--sub-auto=no',...subtitleArgs,
       platform === 'win32' ? `--input-ipc-server=${pipe}` : '--input-ipc-client=fd://3',
       '--input-terminal=no', '--terminal=no', '--force-window=yes', `--title=Offgrid — ${title}`, `--start=${position}`,
       ...(platform === 'win32' ? ['--idle=yes'] : ['--', filePath])];

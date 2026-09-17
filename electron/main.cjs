@@ -18,6 +18,20 @@ let managedMpv;
 const { requestLocalNetworkAccess } = require('./local-network.cjs');
 const { createAppUpdates } = require('./app-updates.cjs');
 const { createUpdateDownload } = require('./update-download.cjs');
+const { createDownloadServices, youtubeTracks } = require('./download-services.cjs');
+const { runYtdlpJson } = require('./youtube-playlists.cjs');
+const { createDownloadRecovery } = require('./download-recovery.cjs');
+const { createAssetRecovery } = require('./asset-recovery.cjs');
+const { MAX_SUBTITLE_BYTES, subtitleAsset, ownedAssetPath } = require('./media-assets.cjs');
+const { smallerCopy } = require('./media-conversion.cjs');
+const { projectQueue } = require('./batch-downloads.cjs');
+const { createCaptureStore, parseCaptureUri } = require('./link-capture.cjs');
+let captureStore;
+let captureError=null;
+const earlyCaptures=[];
+let downloadServices;
+let recovery,assetRecovery;
+let assetsDirectory;
 let appUpdates;
 let updateDownload;
 function appUpdateSnapshot() {
@@ -50,6 +64,42 @@ if(process.env.OFFGRID_DATA_DIR) {
   app.setPath("userData",isolatedDirectory);
 }
 
+function captureSnapshot() {return {...(captureStore?.list() || {items:[],warning:null}),warning:captureError || captureStore?.list().warning || null};}
+function showCaptureWindow() {
+  if(!app.isReady?.() || !downloadServices) return;
+  if(!mainWindow || mainWindow.isDestroyed()) createWindow();
+  if(mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();mainWindow.focus();
+  broadcast('capture:update',captureSnapshot());
+}
+function receiveCapture(uri) {
+  try {
+    parseCaptureUri(uri);
+    if(captureStore) {captureError=null;captureStore.receive(uri);}
+    else if(earlyCaptures.length<20) earlyCaptures.push(uri);
+    else captureError='20 links are waiting. Send additional links after opening Offgrid.';
+  } catch(error) {captureError=error.message;}
+  showCaptureWindow();
+}
+app.on('open-url',(event,url)=>{event.preventDefault();receiveCapture(url);});
+const primaryInstance=app.requestSingleInstanceLock();
+if(!primaryInstance) app.quit();
+app.on('second-instance',(_event,argv)=>{
+  for(const value of argv || []) if(typeof value==='string' && value.startsWith('offgrid:')) receiveCapture(value);
+  showCaptureWindow();
+});
+for(const value of process.argv) if(typeof value==='string' && value.startsWith('offgrid:')) receiveCapture(value);
+function handle(channel,callback) {
+  ipcMain.handle(channel,(event,...args)=>{
+    const contents=mainWindow?.webContents;
+    const url=event.senderFrame?.url;
+    const entry=pathToFileURL(path.join(__dirname,'..','dist','index.html')).toString();
+    const allowed=url===entry || typeof url==='string' && url.startsWith(entry+'#') || process.argv.includes('--dev') && url==='http://127.0.0.1:5173/';
+    if(!contents || event.sender!==contents || event.senderFrame!==contents.mainFrame || !allowed) throw new Error('This request did not come from the Offgrid window.');
+    return callback(event,...args);
+  });
+}
+
 function broadcast(channel, payload) {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload);
 }
@@ -75,9 +125,12 @@ function trackedSpawn(id, command, args) {
   child.on("error", () => active?.children.delete(child));
   return child;
 }
+function videoFiles(video) {
+  return [video.filePath,video.thumbnailPath,...(video.assets || []).map(asset=>ownedAssetPath(assetsDirectory,video.id,asset))].filter(Boolean);
+}
 function videoView(video) {
   let deletionBytes=0;
-  for(const file of [video.filePath,video.thumbnailPath]) {
+  for(const file of videoFiles(video)) {
     try {if(file) deletionBytes+=fs.statSync(file).size;} catch(error) {if(error.code!=="ENOENT") throw error;}
   }
   return {...video,deletionBytes};
@@ -86,17 +139,19 @@ function libraryViews() {return library.map(videoView);}
 function storageSnapshot() {
   let savedBytes = 0;
   for (const video of library) {
-    for (const file of [video.filePath, video.thumbnailPath]) {
+    for (const file of videoFiles(video)) {
       if (file && fs.existsSync(file)) savedBytes += fs.statSync(file).size;
     }
   }
   const allMedia = directoryBytes(mediaDirectory) + directoryBytes(thumbnailsDirectory);
   let freeBytes = null;
   try { const disk = fs.statfsSync(dataDirectory); freeBytes = Number(disk.bavail) * Number(disk.bsize); } catch {}
-  return {savedBytes, temporaryBytes:Math.max(0,allMedia-savedBytes),
+  const snapshot = {savedBytes, temporaryBytes:Math.max(0,allMedia-savedBytes),
     supportBytes:Math.max(0,directoryBytes(dataDirectory)-allMedia), freeBytes,
     maxLibraryBytes:settings.maxLibraryBytes, libraryPath:dataDirectory,
     diskReserveBytes:DISK_RESERVE_BYTES};
+  if(queue) snapshot.queueProjection=projectQueue(queue.jobs,snapshot);
+  return snapshot;
 }
 function emitStorage() { broadcast("storage:update",storageSnapshot()); }
 function storageViolation() {
@@ -106,14 +161,23 @@ function storageViolation() {
     return "The library limit was reached. Free space, lower quality or increase the limit, then retry.";
   return null;
 }
+function recoverAssetJob(job,discard=false) {
+  const patch=discard ? assetRecovery.discard(job) : assetRecovery.recover(job);
+  fs.rmSync(path.join(workDirectory,job.id),{recursive:true,force:true});
+  return {retainedBytes:0,resumable:false,...patch};
+}
 function cleanupJob(job) {
   if (!/^[a-f0-9-]{36}$/.test(job.id) || library.some(video=>video.id===job.id)) return;
+  if(job.kind==='assets' && assetRecovery) recoverAssetJob(job,true);
   // A UUID job directory and exact UUID output names establish ownership.
   fs.rmSync(path.join(workDirectory,job.id),{recursive:true,force:true});
   for (const directory of [mediaDirectory,thumbnailsDirectory]) {
     for (const name of fs.readdirSync(directory)) {
       if (name.startsWith(`${job.id}.`) && fs.lstatSync(path.join(directory,name)).isFile()) fs.unlinkSync(path.join(directory,name));
     }
+  }
+  if(assetsDirectory && fs.existsSync(assetsDirectory)) for(const name of fs.readdirSync(assetsDirectory)) {
+    if(name.startsWith(`${job.id}.`) && fs.lstatSync(path.join(assetsDirectory,name)).isFile()) fs.unlinkSync(path.join(assetsDirectory,name));
   }
 }
 function cancelPendingAutomaticJobs(subscriptionId, message) {
@@ -136,17 +200,7 @@ function canRunJob(job) {
   return subscriptions.some(subscription=>subscription.id===job.subscriptionId && subscription.autoDownload);
 }
 function queueVideo(args, source = "manual", extra = {}) {
-  if (!args || !isSupportedUrl(args.url)) throw new Error("Paste a valid YouTube video URL.");
-  const quality = args.quality ?? settings.defaultQuality;
-  if (!QUALITIES.includes(quality)) throw new Error("Invalid download quality.");
-  const sourceId = extra.sourceId || sourceIdFromUrl(args.url);
-  const existing=library.find(video=>(sourceId && video.sourceId===sourceId) || video.url===args.url);
-  if(existing) return {accepted:false,alreadySaved:true,videoId:existing.id};
-  if(source === "manual" && sourceId && deletedSources.includes(sourceId)) {
-    deletedSources=deletedSources.filter(id=>id!==sourceId); atomicWriteJson(deletedSourcesPath,deletedSources);
-  }
-  const job=queue.add({url:args.url,quality,saveComments:settings.saveComments,source,sourceId,title:extra.title || "YouTube video",...extra});
-  return {accepted:true,id:job.id,job};
+  return downloadServices.enqueueYoutube(args,source,extra);
 }
 
 const YTDLP_RELEASES_URL =
@@ -673,40 +727,13 @@ function formatForQuality(quality) {
 	);
 }
 
-function runMetadata(
-	url,
-	quality,
-	ytdlpCommand = null,
-	{ includeComments = false, jobId = null } = {},
-) {
-	return new Promise((resolve, reject) => {
-		ytdlpCommand = ytdlpCommand || process.env.OFFGRID_YTDLP_PATH || "yt-dlp";
-		const args = ["--dump-single-json", "--no-playlist", "--skip-download", "--socket-timeout", "20", "--retries", "2"];
-		if (quality) args.push("--format", formatForQuality(quality));
-		if (includeComments) args.push("--write-comments");
-		args.push(url);
-		const child = jobId ? trackedSpawn(jobId, ytdlpCommand, args) : spawn(ytdlpCommand, args, { windowsHide: true });
-		let stdout = "";
-		let stderr = "";
-		child.stdout.on("data", (chunk) => {
-			stdout += chunk.toString();
-		});
-		child.stderr.on("data", (chunk) => {
-			stderr += chunk.toString();
-		});
-		child.on("error", reject);
-		child.on("close", (code) => {
-			if (code !== 0)
-				return reject(
-					new Error(stderr.trim() || "Could not read video metadata."),
-				);
-			try {
-				resolve(JSON.parse(stdout));
-			} catch {
-				reject(new Error("The downloader returned unreadable metadata."));
-			}
-		});
-	});
+function runMetadata(url, quality, ytdlpCommand = null, { includeComments = false, jobId = null, signal } = {}) {
+  const command = ytdlpCommand || process.env.OFFGRID_YTDLP_PATH || 'yt-dlp';
+  const args = ['--dump-single-json','--no-playlist','--skip-download','--socket-timeout','20','--retries','2'];
+  if(quality) args.push('--format',formatForQuality(quality));
+  if(includeComments) args.push('--write-comments');
+  args.push('--',url);
+  return runYtdlpJson(command,args,{signal,spawnProcess:jobId ? (cmd,argv)=>trackedSpawn(jobId,cmd,argv) : (cmd,argv)=>spawn(cmd,argv,{windowsHide:true})});
 }
 
 function extractTopComments(metadata) {
@@ -743,7 +770,7 @@ function runChannelFeed(channelUrl, ytdlpCommand, count = settings.recentVideoCo
 			stdout += chunk.toString();
 		});
 		child.stderr.on("data", (chunk) => {
-			stderr += chunk.toString();
+			stderr = (stderr + chunk.toString()).slice(-128_000);
 		});
 		child.on("error", reject);
 		child.on("close", (code) => {
@@ -924,6 +951,7 @@ function startVideoDownload({
 		fs.mkdirSync(jobDirectory,{recursive:true});
 		const output = path.join(jobDirectory, `${id}.%(ext)s`);
 		const child = trackedSpawn(id, command, [
+      '--ignore-config', '--continue', '--part', '--keep-video',
       "--socket-timeout", "20", "--retries", "2",
 			"--newline",
 			"--progress-template",
@@ -945,6 +973,7 @@ function startVideoDownload({
 			"after_move:filepath",
 			"--output",
 			output,
+			'--',
 			url,
 		]);
 		let stderr = "";
@@ -961,13 +990,22 @@ function startVideoDownload({
 			}
 		}
 		const outputReader = readline.createInterface({ input: child.stdout });
+    const active=queue.active;
+    let progressFailure=null;
 		outputReader.on("line", (line) => {
+      if(progressFailure || active?.stopReason) return;
+      try {
 			const candidate = line.trim();
 			if (path.dirname(candidate) === jobDirectory && fs.existsSync(candidate)) {
 				finalPath = candidate;
 				return;
 			}
 			if (candidate === "OFFGRID_POSTPROCESS") {
+				const job=queue.jobs.find(item=>item.id===id);
+        if(job && !queue.active?.stopReason) {
+          const completedFiles=fs.readdirSync(jobDirectory).filter(name=>name.startsWith(`${id}.f`) && !/\.(part|ytdl|tmp)$/.test(name));
+          recovery.checkpoint(job,{phase:'processing',completedFiles});
+        }
 				sendUpdate({
 					id,
 					status: "processing",
@@ -1026,12 +1064,17 @@ function startVideoDownload({
 				etaSeconds: Number.isFinite(etaSeconds) ? etaSeconds : null,
 				message: "Downloading video…",
 			});
+      const job=queue.jobs.find(item=>item.id===id);
+      if(job && !active?.stopReason) recovery.checkpoint(job,{phase:'downloading'});
+      } catch(error) {progressFailure=error;active?.stop('error',error.message || 'Download recovery could not be saved.');reject(error);}
 		});
 		child.stderr.on("data", (chunk) => {
-			stderr += chunk.toString();
+			stderr = (stderr + chunk.toString()).slice(-128_000);
 		});
 		child.on("error", reject);
 		child.on("close", (code) => {
+      if(progressFailure) return reject(progressFailure);
+      try {
 			if (code !== 0)
 				return reject(new Error(stderr.trim() || "Download failed."));
 			const file =
@@ -1047,6 +1090,7 @@ function startVideoDownload({
 					new Error("The download finished without producing a video file."),
 				);
 			resolve({ filePath: file, sizeBytes: fs.statSync(file).size });
+      } catch(error) {reject(error);}
 		});
 	});
 }
@@ -1058,6 +1102,7 @@ async function getDownloadEstimate({ url, quality } = {}) {
   if (!QUALITIES.includes(quality)) throw new Error("Invalid download quality.");
   const ytdlpCommand = await updateManagedYtdlp();
 	const metadata = await runMetadata(url, quality, ytdlpCommand);
+  downloadServices.recordEstimate(url,quality,metadata);
 	return {
     sourceId:metadata.id || null, duration:metadata.duration || 0, channel:metadata.channel || metadata.uploader || "YouTube",
 		title: metadata.title || "Untitled video",
@@ -1065,53 +1110,149 @@ async function getDownloadEstimate({ url, quality } = {}) {
 	};
 }
 
-async function downloadVideo(job, active) {
-  if (job.provider === 'plex' || job.provider === 'jellyfin') return downloadServerVideo(job, active);
-  const {id,url,quality}=job;
-  if (!net.isOnline()) throw new Error("You are offline. Retry when connected.");
-  const monitor=setInterval(()=>{
+function languageKey(value) {
+  const base=String(value || '').toLowerCase().split('-')[0];
+  return ({eng:'en',fra:'fr',fre:'fr',deu:'de',ger:'de',spa:'es',ita:'it',por:'pt',jpn:'ja',kor:'ko',zho:'zh',chi:'zh'})[base] || base;
+}
+function downloadCaptionFile(job, active, command, track) {
+  return new Promise((resolve,reject)=>{
+    const directory=path.join(workDirectory,job.id);
+    fs.mkdirSync(directory,{recursive:true});
+    const prefix=`${job.id}.caption-${crypto.randomUUID()}`;
+    const args=['--ignore-config','--skip-download','--no-playlist','--socket-timeout','20','--retries','1',
+      track.origin==='auto'?'--write-auto-subs':'--write-subs',track.origin==='auto'?'--no-write-subs':'--no-write-auto-subs',
+      '--sub-langs',track.language,'--sub-format','vtt/srt','--output',path.join(directory,`${prefix}.%(ext)s`),'--',job.url];
+    const child=trackedSpawn(job.id,command,args);
+    let failure;
+    const terminate=message=>{failure ||= new Error(message);child.kill('SIGKILL');};
+    const timeout=setTimeout(()=>terminate('Subtitle download timed out.'),60_000);
+    const monitor=setInterval(()=>{
+      try {for(const name of fs.readdirSync(directory)) if(name.startsWith(prefix) && fs.lstatSync(path.join(directory,name)).size>MAX_SUBTITLE_BYTES) terminate('Subtitle file is larger than 5 MB.');}
+      catch {terminate('Subtitle files could not be checked.');}
+    },100);
+    child.stdout.resume();child.stderr.resume();
+    const finish=()=>{clearTimeout(timeout);clearInterval(monitor);};
+    child.on('error',error=>{finish();reject(error);});
+    child.on('close',code=>{
+      finish();
+      if(failure || code!==0) return reject(failure || new Error('The selected subtitle could not be saved.'));
+      try {
+        assertActive(job.id,active);
+        const file=fs.readdirSync(directory).find(name=>name.startsWith(prefix+'.') && /\.(vtt|srt)$/.test(name));
+        if(!file) throw new Error('The selected subtitle is unavailable.');
+        resolve({file:path.join(directory,file),format:path.extname(file).slice(1)});
+      } catch(error) {reject(error);}
+    });
+  });
+}
+async function saveRequestedSubtitles(job,active,{metadata,client,command,ownerId=job.id}={}) {
+  const assets=[],warnings=[],languages=job.subtitleLanguages || [];
+  if(!languages.length) return {assets,warnings};
+  const directory=path.join(workDirectory,job.id);fs.mkdirSync(directory,{recursive:true});
+  let tracks;
+  try {tracks=client ? await awaitWhileActive(active,()=>client.subtitleTracks(job.ratingKey,{signal:active.controller.signal})) : youtubeTracks(metadata);}
+  catch(error) {assertActive(job.id,active);return {assets,warnings:languages.map(language=>`${language}: subtitles could not be loaded.`)};}
+  for(const language of languages) {
+    assertActive(job.id,active);
+    const matches=tracks.filter(track=>languageKey(track.language)===languageKey(language));
+    const track=matches.find(track=>track.language===language && track.origin!=='auto') || matches.find(track=>track.origin!=='auto') || (job.allowAutoCaptions?matches[0]:null);
+    if(!track) {warnings.push(`${language}: selected subtitles are unavailable.`);continue;}
     try {
-      const violation=storageViolation();
-      if(violation) active.stop("waiting-storage",violation);
-      emitStorage();
-    } catch(error) { active.stop("waiting-storage",`Storage could not be checked: ${error.message}`); }
+      let file,format;
+      if(client) {
+        file=path.join(directory,`${job.id}.caption-${crypto.randomUUID()}.${track.format}`);
+        const result=await active.trackWriter(client.downloadSubtitle(track,file,{signal:active.controller.signal}));format=result.format;
+      } else ({file,format}=await downloadCaptionFile(job,active,command,track));
+      assertActive(job.id,active);
+      assets.push(subtitleAsset({file,format,language:track.language || language,origin:track.origin,outputDirectory:directory,ownerId}));
+    } catch(error) {assertActive(job.id,active);warnings.push(`${language}: ${error.message}`);}
+  }
+  return {assets,warnings};
+}
+function finalAssets(ownerId,assets) {
+  return assets.map(asset=>({...asset,filePath:path.join(assetsDirectory,`${ownerId}.${asset.id}.vtt`)}));
+}
+async function retrySubtitleAssets(job,active) {
+  const video=library.find(item=>item.id===job.targetVideoId);
+  if(!video) throw new Error('This video has been removed.');
+  const context={};let sourceJob={...job,url:video.url,ratingKey:video.ratingKey};
+  if(video.provider==='plex' || video.provider==='jellyfin') {
+    const server=mediaServers[video.provider];
+    if(server.connection.status().serverId!==video.serverId) throw new Error('Reconnect to the original server to save subtitles.');
+    context.client=server.connection.client();
+    const identity=await awaitWhileActive(active,()=>context.client.identity({signal:active.controller.signal}));
+    if(identity.serverId!==video.serverId) throw new Error('This address belongs to a different server.');
+  } else {
+    context.command=await awaitWhileActive(active,()=>updateManagedYtdlp());
+    context.metadata=await runMetadata(video.url,null,context.command,{jobId:job.id,signal:active.controller.signal});
+  }
+  const monitor=setInterval(()=>{try{const violation=storageViolation();if(violation) active.stop('waiting-storage',violation);}catch{active.stop('waiting-storage','Storage could not be checked. Retry when available.');}},500);
+  try {
+    const blocked=checkStorageAdmission(storageSnapshot(),0,1);if(blocked) throw new Error(blocked);
+    const saved=await saveRequestedSubtitles(sourceJob,active,{...context,ownerId:video.id});assertActive(job.id,active);
+    if(!library.some(item=>item.id===video.id)) throw new Error('This video has been removed.');
+    const violation=storageViolation();if(violation) {active.stop('waiting-storage',violation);assertActive(job.id,active);}
+    const assets=finalAssets(video.id,saved.assets),previous=video.assets || [];
+    const replaced=previous.filter(asset=>saved.assets.some(next=>languageKey(next.language)===languageKey(asset.language)));
+    assetRecovery.commit(job,{videoId:video.id,assets,sources:saved.assets,replaced,warnings:saved.warnings});
+    fs.rmSync(path.join(workDirectory,job.id),{recursive:true,force:true});
+    broadcast('library:update',libraryViews());
+    sendUpdate({id:job.id,status:'complete',progress:100,videoId:video.id,message:saved.warnings.length?'Video ready; some subtitles are still unavailable.':'Subtitles saved',error:null});
+  } finally {clearInterval(monitor);emitStorage();}
+}
+
+async function downloadVideo(job, active) {
+  if(job.kind==='assets') return retrySubtitleAssets(job,active);
+  if(job.provider==='plex' || job.provider==='jellyfin') return downloadServerVideo(job,active);
+  const {id,url,quality}=job;
+  if(!net.isOnline()) throw new Error('You are offline. Retry when connected.');
+  const monitor=setInterval(()=>{
+    try {const violation=storageViolation();if(violation) active.stop('waiting-storage',violation);emitStorage();}
+    catch {active.stop('waiting-storage','Storage could not be checked. Retry when available.');}
   },500);
   try {
-    const ytdlpCommand=await awaitWhileActive(active,()=>updateManagedYtdlp()); assertActive(id,active);
-    const metadata=await runMetadata(url,quality,ytdlpCommand,{jobId:id}); assertActive(id);
+    const ytdlpCommand=await awaitWhileActive(active,()=>updateManagedYtdlp());assertActive(id,active);
+    const metadata=await runMetadata(url,quality,ytdlpCommand,{jobId:id,signal:active.controller.signal});assertActive(id,active);
+    if(job.sourceId && metadata.id && metadata.id!==job.sourceId) throw new Error('The source returned a different video. Add the link again.');
     const existing=library.find(video=>metadata.id && video.sourceId===metadata.id);
-    if(existing) { sendUpdate({id,status:"complete",progress:100,title:existing.title,videoId:existing.id,message:"Already in your library"}); return; }
-    if(job.source==="subscription" && deletedSources.includes(metadata.id)) {active.stop("canceled","This video was previously removed from your library."); assertActive(id);}
+    if(existing) {sendUpdate({id,status:'complete',progress:100,title:existing.title,videoId:existing.id,message:'Already in your library'});return;}
+    if(job.source==='subscription' && deletedSources.includes(metadata.id)) {active.stop('canceled','This video was previously removed from your library.');assertActive(id,active);}
     const expectedBytes=getExpectedSize(metadata);
-    queue.update(id,{sourceId:metadata.id || job.sourceId,title:metadata.title || "Untitled video",expectedBytes});
-    const blocked=checkStorageAdmission(storageSnapshot(),expectedBytes);
-    if(blocked) {active.stop("waiting-storage",blocked); assertActive(id);}
-    const ffmpegPath=await awaitWhileActive(active,()=>updateManagedFfmpeg()); assertActive(id,active);
-    if(!ffmpegPath) throw new Error("FFmpeg is not ready. Update download components in Settings and retry.");
-    sendUpdate({id,status:"downloading",progress:0,title:metadata.title,expectedBytes,message:"Downloading video…"});
-    const download=await startVideoDownload({id,url,quality,metadata,expectedBytes,ytdlpCommand,ffmpegPath}); assertActive(id);
-    sendUpdate({id,status:"processing",progress:100,indeterminate:true,title:metadata.title,message:"Saving thumbnail…"});
-    const thumbnailPath=await saveThumbnail({id,metadata,filePath:download.filePath,ffmpegPath}); assertActive(id);
+    queue.update(id,{sourceId:metadata.id || job.sourceId,title:metadata.title || 'Untitled video',expectedBytes});
+    const formatIds=(metadata.requested_formats?.length?metadata.requested_formats:[metadata]).map(format=>String(format.format_id || 'unknown'));
+    const state=recovery.prepare(job,{formatIds,expectedBytes});
+    const blocked=checkStorageAdmission(storageSnapshot(),expectedBytes,3,state.retainedBytes);
+    if(blocked) {active.stop('waiting-storage',blocked);assertActive(id,active);}
+    const ffmpegPath=await awaitWhileActive(active,()=>updateManagedFfmpeg());assertActive(id,active);
+    if(!ffmpegPath) throw new Error('FFmpeg is not ready. Update download components in Settings and retry.');
+    const complete=state.files?.find(file=>file.complete && file.name===`${id}.mp4`);
+    let download;
+    if(complete) download={filePath:path.join(workDirectory,id,complete.name),sizeBytes:complete.sizeBytes};
+    else {
+      sendUpdate({id,status:'downloading',progress:job.progress || 0,title:metadata.title,expectedBytes,message:state.resumable?'Resuming video…':'Downloading video…'});
+      download=await startVideoDownload({id,url,quality,metadata,expectedBytes,ytdlpCommand,ffmpegPath});assertActive(id,active);
+      recovery.checkpoint(job,{phase:'processing',completedFiles:[path.basename(download.filePath)]});
+    }
+    sendUpdate({id,status:'processing',progress:100,indeterminate:true,title:metadata.title,message:'Saving offline details…'});
+    const thumbnailPath=await saveThumbnail({id,metadata,filePath:download.filePath,ffmpegPath});assertActive(id,active);
+    const subtitles=await saveRequestedSubtitles(job,active,{metadata,command:ytdlpCommand});assertActive(id,active);
     let comments=[];
     if(job.saveComments) {
-      sendUpdate({id,status:"processing",progress:100,indeterminate:true,title:metadata.title,message:"Saving available comments…"});
-      try {comments=extractTopComments(await runMetadata(url,null,ytdlpCommand,{includeComments:true,jobId:id}));}
-      catch(error) {assertActive(id); console.warn("Comments unavailable:",error.message);}
+      try {comments=extractTopComments(await runMetadata(url,null,ytdlpCommand,{includeComments:true,jobId:id,signal:active.controller.signal}));}
+      catch {assertActive(id,active);}
     }
-    assertActive(id);
-    const violation=storageViolation();
-    if(violation) {active.stop("waiting-storage",violation); assertActive(id);}
-    const filePath=path.join(mediaDirectory,`${id}.mp4`);
-    fs.renameSync(download.filePath,filePath);
-    const video={id,sourceId:metadata.id || null,title:metadata.title || "Untitled video",
-      channel:metadata.channel || metadata.uploader || "YouTube",channelId:metadata.channel_id || metadata.uploader_id || null,
+    assertActive(id,active);
+    const violation=storageViolation();if(violation) {active.stop('waiting-storage',violation);assertActive(id,active);}
+    const video={id,sourceId:metadata.id || null,title:metadata.title || 'Untitled video',
+      channel:metadata.channel || metadata.uploader || 'YouTube',channelId:metadata.channel_id || metadata.uploader_id || null,
       channelUrl:metadata.channel_url || metadata.uploader_url || null,duration:metadata.duration || 0,width:metadata.width || null,height:metadata.height || null,
-      url,filePath,thumbnailPath,comments,sizeBytes:fs.statSync(filePath).size,expectedBytes,savedAt:new Date().toISOString(),playbackPositionSeconds:0,watched:false};
-    library=[video,...library];
-    try {persistLibrary();} catch(error) {library=library.filter(item=>item.id!==id); throw error;}
-    fs.rmSync(path.join(workDirectory,id),{recursive:true,force:true});
-    sendUpdate({id,status:"complete",progress:100,title:video.title,videoId:id,video:videoView(video),message:"Ready to watch",error:null});
-  } finally {clearInterval(monitor); emitStorage();}
+      url,filePath:path.join(mediaDirectory,`${id}.mp4`),thumbnailPath,comments,sizeBytes:download.sizeBytes,expectedBytes,
+      subtitleLanguages:job.subtitleLanguages || [],allowAutoCaptions:job.allowAutoCaptions || false,assets:finalAssets(id,subtitles.assets),assetWarnings:subtitles.warnings,
+      savedAt:new Date().toISOString(),playbackPositionSeconds:0,watched:false};
+    recovery.commit(job,video,download.filePath,{assetSources:subtitles.assets.map(asset=>({sourcePath:asset.filePath,assetId:asset.id}))});
+    sendUpdate({id,status:'complete',progress:100,title:video.title,videoId:id,video:videoView(video),retainedBytes:0,resumable:false,
+      message:subtitles.warnings.length?'Ready to watch; some subtitles are unavailable.':'Ready to watch',error:null});
+  } finally {clearInterval(monitor);emitStorage();}
 }
 
 function savePlayback(id, progress) {
@@ -1124,78 +1265,82 @@ function savePlayback(id, progress) {
   return videoView(updated);
 }
 
-async function queueServerVideo(provider, ratingKey) {
-  const server = mediaServers[provider];
-  const revision = server.revision;
-  if (server.busy) throw new Error(`Wait for the ${server.name} connection to finish.`);
-  const connection = server.connection.status();
-  const client = server.connection.client();
-  const metadata = await client.metadata(ratingKey);
-  if (server.busy || server.revision !== revision || server.connection.status().serverId !== connection.serverId || server.connection.status().baseUrl !== connection.baseUrl)
-    throw new Error(`The ${server.name} connection changed. Select the video again.`);
-  const sourceId = `${provider}:${connection.serverId}:${metadata.id}`;
-  const existing = library.find(video=>video.sourceId===sourceId);
-  if (existing) return { accepted:false, alreadySaved:true, videoId:existing.id };
-  const job = queue.add({ provider, source:'manual', sourceId,
-    serverId:connection.serverId, ratingKey:metadata.id,
-    url:`${provider}://${encodeURIComponent(connection.serverId)}/${metadata.id}`,
-    quality:'original', title:metadata.title, expectedBytes:metadata.sizeBytes });
-  return { accepted:true, id:job.id };
+async function queueServerVideo(provider, id, options = {}) {
+  const summary = await downloadServices.downloadServerBatch(provider,{...options,ids:[id]});
+  const result=summary.results[0];
+  if(result.outcome==='rejected') throw new Error(result.reason);
+  return {...result,accepted:result.outcome==='added',alreadySaved:result.outcome==='alreadySaved'};
 }
 
 async function downloadServerVideo(job, active) {
-  const provider = job.provider;
-  const server = mediaServers[provider];
-  const {id}=job;
-  if (server.busy) throw new Error(`The ${server.name} connection is changing. Retry shortly.`);
-  if (server.connection.status().serverId !== job.serverId) throw new Error(`Reconnect to the ${server.name} server used for this download, then retry.`);
+  const provider=job.provider,server=mediaServers[provider],{id}=job;
+  if(server.busy) throw new Error(`The ${server.name} connection is changing. Retry shortly.`);
+  if(server.connection.status().serverId!==job.serverId) throw new Error(`Reconnect to the ${server.name} server used for this download, then retry.`);
   const client=server.connection.client();
   const monitor=setInterval(()=>{
-    try {
-      const violation=storageViolation();
-      if(violation) active.stop('waiting-storage',violation);
-      emitStorage();
-    } catch { active.stop('waiting-storage','Storage could not be checked. Retry when storage is available.'); }
+    try {const violation=storageViolation();if(violation) active.stop('waiting-storage',violation);emitStorage();}
+    catch {active.stop('waiting-storage','Storage could not be checked. Retry when storage is available.');}
   },500);
   try {
-    const identity=await awaitWhileActive(active,()=>client.identity({signal:active.controller.signal}));
+    const identity=await awaitWhileActive(active,()=>client.identity({signal:active.controller.signal}));assertActive(id,active);
     if(identity.serverId!==job.serverId) throw new Error(`This address now belongs to a different ${server.name} server. Reconnect before downloading.`);
-    const metadata=await awaitWhileActive(active,()=>client.metadata(job.ratingKey,{signal:active.controller.signal}));
-    const expectedSourceId=`${provider}:${job.serverId}:${metadata.id}`;
-    if(expectedSourceId!==job.sourceId) throw new Error(`${server.name} returned a different video. Select the video again.`);
+    const metadata=await awaitWhileActive(active,()=>client.metadata(job.ratingKey,{signal:active.controller.signal}));assertActive(id,active);
+    if(`${provider}:${job.serverId}:${metadata.id}`!==job.sourceId) throw new Error(`${server.name} returned a different video. Select the video again.`);
     const existing=library.find(video=>video.sourceId===job.sourceId);
-    if(existing) {sendUpdate({id,status:'complete',progress:100,videoId:existing.id,message:'Already in your library'}); return;}
+    if(existing) {sendUpdate({id,status:'complete',progress:100,videoId:existing.id,message:'Already in your library'});return;}
     queue.update(id,{title:metadata.title,expectedBytes:metadata.sizeBytes});
-    const blocked=checkStorageAdmission(storageSnapshot(),metadata.sizeBytes,1);
-    if(blocked) {active.stop('waiting-storage',blocked); assertActive(id);}
-    const directory=path.join(workDirectory,id);
-    fs.mkdirSync(directory,{recursive:true});
+    const state=recovery.prepare(job,{formatIds:[metadata.extension,String(metadata.sizeBytes)],expectedBytes:metadata.sizeBytes});
+    const converting=job.copyQuality==='720p';
+    const blocked=checkStorageAdmission(storageSnapshot(),metadata.sizeBytes,converting?2:1,state.retainedBytes,converting?32_000_000:16_000_000);
+    if(blocked) {active.stop('waiting-storage',blocked);assertActive(id,active);}
+    const directory=path.join(workDirectory,id);fs.mkdirSync(directory,{recursive:true});
     if(!/^[a-z0-9]{1,10}$/.test(metadata.extension)) throw new Error(`${server.name} returned an unsupported file extension.`);
-    const temporary=path.join(directory,`${id}.${metadata.extension}`);
-    let lastUpdate=0;
-    sendUpdate({id,status:'downloading',progress:0,message:'Downloading original file…'});
-    await client.download(metadata,temporary,{signal:active.controller.signal,onProgress:progress=>{
-      if(active.stopReason) return;
-      if(Date.now()-lastUpdate<250 && progress.progress<100) return;
-      lastUpdate=Date.now();
-      sendUpdate({id,status:'downloading',progress:progress.progress,downloadedBytes:progress.downloadedBytes,
-        expectedBytes:progress.totalBytes || metadata.sizeBytes,message:'Downloading original file…'});
-    }});
-    assertActive(id);
-    const violation=storageViolation();
-    if(violation) {active.stop('waiting-storage',violation); assertActive(id);}
-    const filePath=path.join(mediaDirectory,`${id}.${metadata.extension}`);
-    fs.renameSync(temporary,filePath);
-    const video={id,provider,sourceId:job.sourceId,serverId:job.serverId,ratingKey:metadata.id,
-      title:metadata.title,channel:metadata.channel || server.connection.status().serverName || `${server.name}`,
-      duration:metadata.duration || 0,url:job.url,filePath,thumbnailPath:null,comments:[],
-      sizeBytes:fs.statSync(filePath).size,expectedBytes:metadata.sizeBytes,savedAt:new Date().toISOString(),
-      playbackPositionSeconds:0,watched:false};
-    library=[video,...library];
-    try {persistLibrary();} catch(error) {library=library.filter(item=>item.id!==id); throw error;}
-    fs.rmSync(directory,{recursive:true,force:true});
-    sendUpdate({id,status:'complete',progress:100,title:video.title,videoId:id,video:videoView(video),message:'Ready to watch',error:null});
-  } finally {clearInterval(monitor); emitStorage();}
+    const inputName=`${id}.original.${metadata.extension}`,temporary=path.join(directory,inputName);
+    const completeInput=state.files?.find(file=>file.name===inputName && file.complete && file.sizeBytes===metadata.sizeBytes);
+    if(!completeInput) {
+      let lastUpdate=0;
+      sendUpdate({id,status:'downloading',message:state.manifest?.transfer?.etag?'Resuming original file…':'Downloading original file…'});
+      await active.trackWriter(client.download(metadata,temporary,{signal:active.controller.signal,retainOnError:true,resumeState:state.manifest?.transfer,
+        onCheckpoint:transfer=>{
+          if(queue.active!==active || active.stopReason?.status==='canceled') return;
+          const retained=recovery.checkpoint(job,{phase:'downloading',transfer});
+          queue.update(id,{retainedBytes:retained.retainedBytes,resumable:Boolean(transfer?.etag),resumeMessage:transfer?.etag?'Partial data can be resumed.':'This server may restart interrupted transfers.'});
+        },onProgress:progress=>{
+          if(active.stopReason || queue.active!==active) return;
+          if(Date.now()-lastUpdate<250 && progress.progress<100) return;lastUpdate=Date.now();
+          sendUpdate({id,status:'downloading',progress:progress.progress,downloadedBytes:progress.downloadedBytes,expectedBytes:progress.totalBytes || metadata.sizeBytes,
+            message:progress.resumedBytes?'Resuming original file…':'Downloading original file…'});
+        }}));
+      assertActive(id,active);recovery.checkpoint(job,{phase:'processing',completedFiles:[inputName]});
+    }
+    let download={filePath:temporary,sizeBytes:fs.statSync(temporary).size},embeddedAssets=[];
+    if(converting) {
+      const ffmpegPath=await awaitWhileActive(active,()=>updateManagedFfmpeg());assertActive(id,active);
+      sendUpdate({id,status:'processing',progress:100,message:'Preparing smaller copy on this Mac…'});
+      const output=path.join(directory,`${id}.smaller.mp4`);
+      recovery.checkpoint(job,{phase:'processing',completedFiles:[inputName],outputFiles:[path.basename(output)]});
+      download=await smallerCopy({command:ffmpegPath,input:temporary,output,jobId:id,spawnProcess:(command,args)=>trackedSpawn(id,command,args),
+        assertActive:()=>assertActive(id,active),onProgress:chunk=>{
+          const match=/out_time_us=(\d+)/.exec(chunk);
+          if(match && metadata.duration && !active.stopReason) sendUpdate({id,status:'processing',processingProgress:Math.min(100,Number(match[1])/1e6/metadata.duration*100),message:'Preparing smaller copy on this Mac…'});
+        }});assertActive(id,active);
+      recovery.checkpoint(job,{phase:'processing',completedFiles:[inputName,path.basename(output)],outputFiles:[path.basename(output)]});
+      embeddedAssets=(download.subtitles || []).map(track=>subtitleAsset({...track,outputDirectory:directory,ownerId:id}));
+    }
+    sendUpdate({id,status:'processing',progress:100,message:'Saving offline details…'});
+    const subtitles=await saveRequestedSubtitles(job,active,{client});assertActive(id,active);
+    const assets=[...embeddedAssets,...subtitles.assets];
+    const violation=storageViolation();if(violation) {active.stop('waiting-storage',violation);assertActive(id,active);}
+    const filePath=path.join(mediaDirectory,`${id}.${converting?'mp4':metadata.extension}`);
+    const video={id,provider,sourceId:job.sourceId,serverId:job.serverId,ratingKey:metadata.id,title:metadata.title,
+      channel:metadata.channel || server.connection.status().serverName || server.name,duration:metadata.duration || 0,url:job.url,filePath,thumbnailPath:null,comments:[],
+      sizeBytes:download.sizeBytes,expectedBytes:metadata.sizeBytes,sourceBytes:metadata.sizeBytes,copyQuality:job.copyQuality || 'original',
+      subtitleLanguages:job.subtitleLanguages || [],assets:finalAssets(id,assets),assetWarnings:subtitles.warnings,
+      savedAt:new Date().toISOString(),playbackPositionSeconds:0,watched:false};
+    recovery.commit(job,video,download.filePath,{assetSources:assets.map(asset=>({sourcePath:asset.filePath,assetId:asset.id}))});
+    sendUpdate({id,status:'complete',progress:100,title:video.title,videoId:id,video:videoView(video),retainedBytes:0,resumable:false,
+      message:subtitles.warnings.length?'Ready to watch; some subtitles are unavailable.':'Ready to watch',error:null});
+  } finally {clearInterval(monitor);emitStorage();}
 }
 
 function createWindow() {
@@ -1212,6 +1357,10 @@ function createWindow() {
 			nodeIntegration: false,
 		},
 	});
+
+  mainWindow.webContents.on('will-navigate',event=>event.preventDefault());
+  mainWindow.webContents.setWindowOpenHandler(()=>({action:'deny'}));
+  mainWindow.webContents.on('render-process-gone',()=>downloadServices?.dispose());
 
 	mainWindow.webContents.on(
 		"did-fail-load",
@@ -1244,20 +1393,24 @@ function createWindow() {
 	}
 }
 
-app.whenReady().then(() => {
+if(primaryInstance) app.whenReady().then(() => {
   dataDirectory=process.env.OFFGRID_DATA_DIR || app.getPath("userData");
   fs.mkdirSync(dataDirectory,{recursive:true});
   libraryPath=path.join(dataDirectory,"library.json");
   subscriptionsPath=path.join(dataDirectory,"subscriptions.json");
   settingsPath=path.join(dataDirectory,"settings.json");
   deletedSourcesPath=path.join(dataDirectory,"deleted-sources.json");
+  captureStore=createCaptureStore({file:path.join(dataDirectory,'captures.json'),onChange:()=>broadcast('capture:update',captureSnapshot())});
+  for(const uri of earlyCaptures.splice(0)) receiveCapture(uri);
+  if(app.isPackaged && !testMode) app.setAsDefaultProtocolClient('offgrid');
   mediaDirectory=path.join(dataDirectory,"videos");
   thumbnailsDirectory=path.join(dataDirectory,"thumbnails");
   toolsDirectory=path.join(dataDirectory,"tools");
   workDirectory=path.join(mediaDirectory,".work");
+  assetsDirectory=path.join(mediaDirectory,'.assets');
   toolStatePath=path.join(toolsDirectory,"yt-dlp.json");
   const legacy=fs.existsSync(libraryPath) || fs.existsSync(subscriptionsPath);
-  for(const directory of [mediaDirectory,thumbnailsDirectory,toolsDirectory,workDirectory]) fs.mkdirSync(directory,{recursive:true});
+  for(const directory of [mediaDirectory,thumbnailsDirectory,toolsDirectory,workDirectory,assetsDirectory]) fs.mkdirSync(directory,{recursive:true});
   library=readJson(libraryPath,[]); if(!Array.isArray(library)) library=[];
   subscriptions=readJson(subscriptionsPath,[]); if(!Array.isArray(subscriptions)) subscriptions=[];
   const savedSettings=readJson(settingsPath,defaultSettings(legacy));
@@ -1288,31 +1441,42 @@ app.whenReady().then(() => {
     onProgress:(id,progress)=>{if(library.some(video=>video.id===id)) savePlayback(id,progress);},
     onState:state=>broadcast('player:update',state),
   });
+  recovery=createDownloadRecovery({workDirectory,mediaDirectory,thumbnailsDirectory,assetsDirectory,getLibrary:()=>library,
+    saveLibrary:next=>{atomicWriteJson(libraryPath,next);library=next;broadcast('library:update',libraryViews());}});
+  assetRecovery=createAssetRecovery({workDirectory,assetsDirectory,getLibrary:()=>library,saveLibrary:next=>{atomicWriteJson(libraryPath,next);library=next;broadcast('library:update',libraryViews());}});
   queue=new DurableQueue({file:path.join(dataDirectory,"downloads.json"),execute:downloadVideo,cleanup:cleanupJob,
+    recover:job=>job.kind==='assets'?recoverAssetJob(job):recovery.recover(job),retain:(job,outcome)=>job.kind==='assets'?recoverAssetJob(job):recovery.retain(job,outcome),
     notify:snapshot=>broadcast("queue:update",snapshot),canRun:canRunJob});
+  downloadServices=createDownloadServices({settings:()=>settings,library:()=>library,queue:()=>queue,servers:mediaServers,
+    metadata:runMetadata,ytCommand:()=>updateManagedYtdlp(),spawnProcess:spawn,isOnline:()=>net.isOnline(),
+    clearDeleted:ids=>{const set=new Set(ids);const next=deletedSources.filter(id=>!set.has(id));if(next.length!==deletedSources.length){atomicWriteJson(deletedSourcesPath,next);deletedSources=next;}}});
 
 	protocol.handle("media", async (request) => {
 		let mediaType;
-		let id;
+		let id,assetId;
 		try {
 			const parsed = new URL(request.url);
 			mediaType = parsed.hostname;
-			id = decodeURIComponent(parsed.pathname.slice(1));
+			const segments=parsed.pathname.slice(1).split('/').map(decodeURIComponent);
+      [id,assetId]=segments;
+      if(!['video','thumbnail','subtitle'].includes(mediaType) || segments.length!==(mediaType==='subtitle'?2:1)) throw new Error('Invalid media route');
 		} catch {
 			return new Response("Invalid media request", { status: 400 });
 		}
 		const video = library.find((entry) => entry.id === id);
-		const filePath =
+		const filePath = mediaType==='subtitle' ? ownedAssetPath(assetsDirectory,id,video?.assets?.find(asset=>asset.id===assetId)) :
 			mediaType === "thumbnail" ? video?.thumbnailPath : video?.filePath;
 		if (!video || !filePath || !fs.existsSync(filePath))
 			return new Response("Media not found", { status: 404 });
 		return net.fetch(pathToFileURL(filePath).toString());
 	});
 
-	ipcMain.handle("library:list", () => libraryViews());
+	handle("library:list", () => libraryViews());
+  handle('capture:list',()=>captureSnapshot());
+  handle('capture:acknowledge',(_event,id)=>{captureError=null;captureStore.acknowledge(id);return captureSnapshot();});
   for (const [provider, server] of Object.entries(mediaServers)) {
-    ipcMain.handle(`${provider}:config`,()=>({...server.connection.status(),suggestedBaseUrl:process.env[`OFFGRID_${provider.toUpperCase()}_URL`] || '',platform:process.platform}));
-    ipcMain.handle(`${provider}:request-local-access`,async(_event,baseUrl)=>{
+    handle(`${provider}:config`,()=>({...server.connection.status(),suggestedBaseUrl:process.env[`OFFGRID_${provider.toUpperCase()}_URL`] || '',platform:process.platform}));
+    handle(`${provider}:request-local-access`,async(_event,baseUrl)=>{
       if(localAccessController) throw new Error('A local network check is already running.');
       if(baseUrl !== undefined && typeof baseUrl !== 'string') throw new Error(`Enter your ${server.name} server address first.`);
       const controller=new AbortController();
@@ -1325,7 +1489,7 @@ app.whenReady().then(() => {
         return provider==='jellyfin' ? {...result,message:result.message.replaceAll('Plex','Jellyfin').replaceAll('32400','8096')} : result;
       } finally {if(localAccessController===controller) localAccessController=null;}
     });
-    ipcMain.handle(`${provider}:connect`,async(_event,config)=>{
+    handle(`${provider}:connect`,async(_event,config)=>{
       if(server.busy) throw new Error(`A ${server.name} connection is already being checked.`);
       if(queue.active && queue.jobs.find(job=>job.id===queue.active.id)?.provider===provider)
         throw new Error(`Wait for the current ${server.name} download to finish or cancel it before changing servers.`);
@@ -1333,7 +1497,7 @@ app.whenReady().then(() => {
       server.revision++;
       try {return {...await server.connection.connect(config),platform:process.platform};} finally {server.busy=false;}
     });
-    ipcMain.handle(`${provider}:disconnect`,async()=>{
+    handle(`${provider}:disconnect`,async()=>{
       if(server.busy) throw new Error(`Wait for the ${server.name} connection to finish.`);
       server.busy=true;
       server.revision++;
@@ -1343,29 +1507,29 @@ app.whenReady().then(() => {
         return server.connection.disconnect();
       } finally {server.busy=false;}
     });
-    ipcMain.handle(`${provider}:sections`,()=>server.connection.client().sections());
-    ipcMain.handle(`${provider}:browse`,(_event,args)=>server.connection.client().browse(args));
-    ipcMain.handle(`${provider}:download`,(_event,id)=>queueServerVideo(provider,id));
+    handle(`${provider}:sections`,()=>server.connection.client().sections());
+    handle(`${provider}:browse`,(_event,args)=>server.connection.client().browse(args));
+    handle(`${provider}:download`,(_event,id,options)=>queueServerVideo(provider,id,options));
   }
-  ipcMain.handle('plex:open-local-settings',async()=>{
+  handle('plex:open-local-settings',async()=>{
     if(process.platform!=='darwin') throw new Error('Local Network settings are available on macOS.');
     await shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork');
     return {opened:true};
   });
-  ipcMain.handle('player:status',()=>{void managedMpv?.ensure(); return player.status();});
-  ipcMain.handle('player:state',()=>player.state());
-  ipcMain.handle('player:open',(_event,id)=>{
+  handle('player:status',()=>{void managedMpv?.ensure(); return player.status();});
+  handle('player:state',()=>player.state());
+  handle('player:open',(_event,id)=>{
     const video=library.find(item=>item.id===id);
     if(!video || !video.filePath || !fs.existsSync(video.filePath)) throw new Error('The saved video could not be found.');
-    return player.open(video);
+    return player.open({...video,assets:(video.assets || []).filter(asset=>ownedAssetPath(assetsDirectory,video.id,asset))});
   });
-  ipcMain.handle('player:control',(_event,action)=>{
+  handle('player:control',(_event,action)=>{
     if(!['toggle-pause','stop'].includes(action)) throw new Error('Invalid player action.');
     return player.control(action);
   });
-	ipcMain.handle("subscriptions:list", () => subscriptionViews());
-	ipcMain.handle("subscriptions:sync-status", () => subscriptionSyncStatus);
-	ipcMain.handle("subscriptions:add", async (_event, data) => {
+	handle("subscriptions:list", () => subscriptionViews());
+	handle("subscriptions:sync-status", () => subscriptionSyncStatus);
+	handle("subscriptions:add", async (_event, data) => {
 		const channel = await resolveSubscriptionChannel(data);
 		const existing = subscriptions.find(
 			(subscription) =>
@@ -1390,7 +1554,7 @@ app.whenReady().then(() => {
 		if(data.initialFetchCount > 0) syncSubscriptions(subscription.id,{countOverride:data.initialFetchCount}).catch(()=>{});
 		return subscriptionView(subscription);
 	});
-	ipcMain.handle("subscriptions:remove", (_event, id) => {
+	handle("subscriptions:remove", (_event, id) => {
 		const before = subscriptions.length;
 		subscriptions = subscriptions.filter(
 			(subscription) => subscription.id !== id,
@@ -1402,13 +1566,13 @@ app.whenReady().then(() => {
 		}
 		return subscriptions.length !== before;
 	});
-	ipcMain.handle("subscriptions:sync", (_event,id) => syncSubscriptions(id));
-	ipcMain.handle("tool:status", () => toolStatus);
-	ipcMain.handle("tool:update", () => updateManagedYtdlp({ force: true }));
-	ipcMain.handle("ffmpeg:status", () => ffmpegStatus);
-	ipcMain.handle("ffmpeg:update", () => updateManagedFfmpeg({ force: true }));
-  ipcMain.handle("settings:get",()=>settings);
-  ipcMain.handle("settings:update",(_event,patch)=>{
+	handle("subscriptions:sync", (_event,id) => syncSubscriptions(id));
+	handle("tool:status", () => toolStatus);
+	handle("tool:update", () => updateManagedYtdlp({ force: true }));
+	handle("ffmpeg:status", () => ffmpegStatus);
+	handle("ffmpeg:update", () => updateManagedFfmpeg({ force: true }));
+  handle("settings:get",()=>settings);
+  handle("settings:update",(_event,patch)=>{
     const next=validateSettings(patch,settings); atomicWriteJson(settingsPath,next); settings=next;
     broadcast("settings:update",settings); sendSubscriptionUpdate();
     const violation=storageViolation();
@@ -1416,29 +1580,47 @@ app.whenReady().then(() => {
       const job=queue.jobs.find(item=>item.id===queue.active.id);
       const storage=storageSnapshot();
       const written=directoryBytes(path.join(workDirectory,job.id));
-      const reservation=Number.isFinite(job.expectedBytes)?Math.max(0,Math.ceil(job.expectedBytes*(['plex','jellyfin'].includes(job.provider)?1:3))+16_000_000-written):0;
+      const converting=['plex','jellyfin'].includes(job.provider) && job.copyQuality==='720p';
+      const reservation=Number.isFinite(job.expectedBytes)?Math.max(0,Math.ceil(job.expectedBytes*(['plex','jellyfin'].includes(job.provider)?converting?2:1:3))+(converting?32_000_000:16_000_000)-written):0;
       if(violation || (next.maxLibraryBytes!==null && (job.expectedBytes===null || storage.savedBytes+storage.temporaryBytes+reservation>next.maxLibraryBytes)))
         queue.active.stop("waiting-storage",violation || "The new library limit leaves too little processing space for this download. Increase it or lower quality, then retry.");
     }
     emitStorage(); void queue.pump(); return settings;
   });
-  ipcMain.handle("storage:get",()=>storageSnapshot());
-  ipcMain.handle("storage:reveal",()=>shell.openPath(dataDirectory));
-  ipcMain.handle("app:version",()=>app.getVersion());
-  ipcMain.handle('app:update-status',()=>appUpdateSnapshot());
-  ipcMain.handle('app:update-check',(_event,automatic)=>checkAppUpdate(automatic === true));
-  ipcMain.handle('app:update-download',async()=>{
+  handle("storage:get",()=>storageSnapshot());
+  handle("storage:reveal",()=>shell.openPath(dataDirectory));
+  handle("app:version",()=>app.getVersion());
+  handle('app:update-status',()=>appUpdateSnapshot());
+  handle('app:update-check',(_event,automatic)=>checkAppUpdate(automatic === true));
+  handle('app:update-download',async()=>{
     const current=appUpdates.status();
     if(testMode || !app.isPackaged || current.state!=='available' || !current.release) return appUpdateSnapshot();
     await updateDownload.download(current.release);
     return appUpdateSnapshot();
   });
-  ipcMain.handle('app:update-cancel',async()=>{await updateDownload.cancel();return appUpdateSnapshot();});
-  ipcMain.handle("downloads:list",()=>queue.snapshot());
-  ipcMain.handle("downloads:pause",(_event,paused)=>queue.pause(paused));
-  ipcMain.handle("downloads:cancel",(_event,id)=>queue.cancel(id));
-  ipcMain.handle("downloads:retry",(_event,id,options)=>queue.retry(id,options));
-  ipcMain.handle("subscriptions:update",(_event,id,patch)=>{
+  handle('app:update-cancel',async()=>{await updateDownload.cancel();return appUpdateSnapshot();});
+  handle("downloads:list",()=>queue.snapshot());
+  handle("downloads:pause",(_event,paused)=>queue.pause(paused));
+  handle("downloads:cancel",(_event,id)=>queue.cancel(id));
+  handle("downloads:retry",(_event,id,options)=>queue.retry(id,options));
+  handle('downloads:pause-item',(_event,id)=>queue.pauseJob(id));
+  handle('downloads:resume',(_event,id,options)=>queue.resume(id,options));
+  handle('downloads:preview',(_event,args)=>downloadServices.previewDownloads(args));
+  handle('downloads:cancel-preview',(_event,id)=>downloadServices.cancelPreview(id));
+  handle('downloads:add-batch',(_event,args)=>downloadServices.addDownloadBatch(args));
+  handle('servers:preview-season',(_event,provider,id,requestId)=>downloadServices.previewServerSeason(provider,id,requestId));
+  handle('servers:add-batch',(_event,provider,args)=>downloadServices.downloadServerBatch(provider,args));
+  handle('servers:subtitles',async(_event,provider,id)=>{
+    const context=downloadServices.serverContext(provider);const tracks=await context.client.subtitleTracks(id);context.assert();return tracks;
+  });
+  handle('library:retry-subtitles',(_event,id)=>{
+    const video=library.find(item=>item.id===id);if(!video) throw new Error('This video has been removed.');
+    if(!video.subtitleLanguages?.length) throw new Error('No subtitle language was selected for this video.');
+    return queue.add({kind:'assets',targetVideoId:id,provider:video.provider,serverId:video.serverId,ratingKey:video.ratingKey,source:'manual',
+      sourceId:`assets:${id}`,url:`${video.url}#offgrid-subtitles`,title:`Subtitles · ${video.title}`,quality:'original',
+      subtitleLanguages:video.subtitleLanguages,allowAutoCaptions:Boolean(video.allowAutoCaptions)});
+  });
+  handle("subscriptions:update",(_event,id,patch)=>{
     const subscription=subscriptions.find(item=>item.id===id); if(!subscription) throw new Error("Channel not found.");
     if(!patch || Object.keys(patch).some(key=>!["autoDownload","recentVideoCount","checkIntervalHours"].includes(key))) throw new Error("Invalid channel settings.");
     validateSettings(patch);
@@ -1448,23 +1630,25 @@ app.whenReady().then(() => {
     if(patch.autoDownload===false) cancelPendingAutomaticJobs(id,"Automatic downloads are off for this channel. Retry to download manually.");
     sendSubscriptionUpdate(); void queue.pump(); return subscriptionView(updated);
   });
-  ipcMain.handle("library:playback",(_event,id,progress)=>{
+  handle("library:playback",(_event,id,progress)=>{
     return savePlayback(id,progress);
   });
-  ipcMain.handle("library:delete", async (_event, id) => {
+  handle("library:delete", async (_event, id) => {
     const video=library.find(entry=>entry.id===id); if(!video) return false;
+    for(const job of queue.jobs) if(job.kind==='assets' && job.targetVideoId===id && !['complete','canceled'].includes(job.status)) await queue.cancel(job.id);
     if(player.state().videoId===id) await player.stop();
     if(video.sourceId && !deletedSources.includes(video.sourceId)) {
       deletedSources.push(video.sourceId); atomicWriteJson(deletedSourcesPath,deletedSources);
     }
-    for(const file of [video.filePath,video.thumbnailPath]) if(file && fs.existsSync(file)) fs.unlinkSync(file);
+    for(const file of videoFiles(video)) if(file && fs.existsSync(file)) fs.unlinkSync(file);
     library=library.filter(entry=>entry.id!==id); persistLibrary(); emitStorage(); return true;
   });
-  ipcMain.handle("download:estimate",(_event,args)=>getDownloadEstimate(args));
-  ipcMain.handle("download:start",(_event,args)=>queueVideo(args));
+  handle("download:estimate",(_event,args)=>getDownloadEstimate(args));
+  handle("download:start",(_event,args)=>queueVideo(args));
 
 	createWindow();
   if (!testMode && app.isPackaged) setTimeout(()=>{void checkAppUpdate(true).catch(()=>{});},1500).unref?.();
+  mainWindow.webContents.once('did-finish-load',()=>broadcast('capture:update',captureSnapshot()));
   const settingsMenu={label:"Settings…",accelerator:"CmdOrCtrl+,",click:()=>{
     if(!mainWindow || mainWindow.isDestroyed()) {
       createWindow();
@@ -1497,15 +1681,15 @@ app.on("window-all-closed", () => {
 	if (process.platform !== "darwin") app.quit();
 });
 
-let finishingQuit = false;
-app.on("before-quit", event => {
-  if (finishingQuit) return;
+let exitReady=false,exitPending=false;
+app.on('before-quit',event=>{
+  if(exitReady) return;
   event?.preventDefault?.();
-  appUpdates?.dispose();
-  localAccessController?.abort();
-  if(queue) {queue.shuttingDown=true; queue.active?.stop("error","Offgrid closed before this download finished. Retry to start again."); queue.persist();}
-  Promise.allSettled([updateDownload?.dispose(), managedMpv?.dispose(), player?.stop(), queue?.active?.done]).finally(() => {
-    finishingQuit = true;
-    app.quit();
+  if(exitPending) return;
+  exitPending=true;
+  downloadServices?.dispose();appUpdates?.dispose();localAccessController?.abort();
+  const deadline=setTimeout(()=>{exitReady=true;app.exit(0);},8000);deadline.unref?.();
+  Promise.allSettled([queue?.shutdown(),player?.stop(),updateDownload?.dispose(),managedMpv?.dispose()]).finally(()=>{
+    clearTimeout(deadline);exitReady=true;app.exit(0);
   });
 });
